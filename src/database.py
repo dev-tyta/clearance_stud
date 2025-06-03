@@ -3,6 +3,7 @@ import sqlalchemy
 import os
 from dotenv import load_dotenv
 from datetime import datetime
+import enum # Import enum
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -21,6 +22,19 @@ if not DATABASE_URL:
 # The 'databases' library uses the connection string to determine the dialect and driver
 database = databases.Database(DATABASE_URL)
 
+# Define Enum for User Roles
+class UserRole(str, enum.Enum):
+    student = "student"
+    admin = "admin"
+
+# Define Enum for Clearance Departments
+class ClearanceDepartment(str, enum.Enum):
+    DEPARTMENTAL = "Departmental"
+    LIBRARY = "Library"
+    BURSARY = "Bursary"
+    ALUMNI = "Alumni"
+
+
 # Create a MetaData object to hold the database schema
 metadata = sqlalchemy.MetaData()
 
@@ -32,16 +46,31 @@ students = sqlalchemy.Table(
     sqlalchemy.Column("student_id", sqlalchemy.String, unique=True, index=True), # Added index for faster lookups
     sqlalchemy.Column("name", sqlalchemy.String),
     sqlalchemy.Column("department", sqlalchemy.String),
-    sqlalchemy.Column("tag_id", sqlalchemy.String, unique=True, index=True), # Added index
+    sqlalchemy.Column("tag_id", sqlalchemy.String, unique=True, index=True, nullable=True), # RFID tag, can be nullable if not immediately assigned
+)
+
+# Define the 'users' table
+users = sqlalchemy.Table(
+    "users",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("username", sqlalchemy.String, unique=True, index=True), # For staff/admin login
+    sqlalchemy.Column("hashed_password", sqlalchemy.String),
+    sqlalchemy.Column("role", sqlalchemy.Enum(UserRole), default=UserRole.student),
+    sqlalchemy.Column("student_db_id", sqlalchemy.Integer, sqlalchemy.ForeignKey("students.id"), nullable=True, unique=True), # Link to students.id
+    sqlalchemy.Column("is_active", sqlalchemy.Boolean, default=True),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.utcnow),
 )
 
 # Define the 'clearance_statuses' table using SQLAlchemy
 clearance_statuses = sqlalchemy.Table(
     "clearance_statuses",
     metadata,
-    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
-    sqlalchemy.Column("student_id", sqlalchemy.String, index=True), # Added index
-    sqlalchemy.Column("department", sqlalchemy.String, index=True), # Added index
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True, autoincrement=True),
+    # Changed to link to students.student_id for consistency, or students.id if preferred
+    sqlalchemy.Column("student_id", sqlalchemy.String, sqlalchemy.ForeignKey("students.student_id"), index=True),
+    # Using Enum for department
+    sqlalchemy.Column("department_name", sqlalchemy.Enum(ClearanceDepartment), index=True),
     sqlalchemy.Column("status", sqlalchemy.Boolean, default=False),
     sqlalchemy.Column("remarks", sqlalchemy.String, nullable=True),
     sqlalchemy.Column("updated_at", sqlalchemy.DateTime, default=datetime.utcnow),

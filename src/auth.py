@@ -1,30 +1,27 @@
-from fastapi import HTTPException, status, Depends
-from src.database import database, devices # Import database instance and devices table
+from fastapi import HTTPException, status, Header, Depends
+from src.database import database, devices
+# from src.models import Device  # If you have a Pydantic model for a device row
 
-# Dependency to verify the API key sent by ESP32 devices
-async def verify_api_key(api_key: str = Depends(HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key"))):
+# Dependency to get and verify API key from header
+async def get_verified_device(x_api_key: str = Header(..., description="The API Key for the ESP32 device.")):
     """
-    Verifies if the provided API key is valid and corresponds to a registered device
-    using the 'databases' library.
-
-    Args:
-        api_key: The API key provided in the request header or body.
-
-    Returns:
-        The database record of the device if the API key is valid.
-
-    Raises:
-        HTTPException: If the API key is invalid or not found.
+    Verifies if the provided API key in the 'X-API-KEY' header is valid.
+    Returns the device record if valid.
     """
-    # Use 'databases' to execute a select query on the 'devices' table
-    query = devices.select().where(devices.c.api_key == api_key)
-    device = await database.fetch_one(query) # fetch_one returns a single record or None
+    if not x_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key in X-API-KEY header",
+        )
+    
+    query = devices.select().where(devices.c.api_key == x_api_key)
+    device_row = await database.fetch_one(query)
 
-    if not device:
-        # Raise HTTPException if the API key is not found
+    if not device_row:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"}, # Optional: Suggest Bearer token scheme
         )
-    return device
+    # Optionally convert to a Pydantic model:
+    # return Device(**device_row)
+    return device_row # Returns the raw database row (dictionary-like)
