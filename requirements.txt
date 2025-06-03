@@ -1,0 +1,11 @@
+fastapi 
+uvicorn 
+databases[postgresql] 
+asyncpg
+pydantic
+pydantic[email]
+pydantic[email,cryptography]
+python-dotenv 
+sqlalchemy
+supabase
+psycopg2-binary
