@@ -1,80 +1,109 @@
 from fastapi import APIRouter, HTTPException, status, Depends
-from typing import List
-from src import crud
-from src.models import StudentCreate, Student, StudentUpdate, ClearanceDetail, TagLinkRequest, ClearanceDepartment, ClearanceStatusEnum # Added TagLinkRequest, enums
-from src.auth import get_current_active_admin_user_from_token, authenticate_tag, UserRole # Corrected import path
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session as SQLAlchemySessionType
+from typing import List, Dict, Any # For type hinting
+
+from src import crud, models
+from src.auth import get_current_active_admin_user_from_token # Returns ORM User
+from src.database import get_db
 
 router = APIRouter(
     prefix="/api/students",
     tags=["students"],
+    # All student management routes require an active admin (token-based)
+    dependencies=[Depends(get_current_active_admin_user_from_token)]
 )
 
-# Helper function to format clearance details (moved from main.py)
-async def _get_formatted_clearance_details(student_id: str, student_info: dict) -> ClearanceDetail:
-    statuses = await crud.get_clearance_statuses_by_student_id(student_id)
-    clearance_items = []
-    overall_status = True
-    for status_item in statuses:
-        clearance_items.append({
-            "department": status_item["department"],
-            "status": status_item["status"],
-            "remarks": status_item["remarks"],
-            "updated_at": status_item["updated_at"].isoformat()
-        })
-        if not status_item["status"]:
-            overall_status = False
+# Helper function to format clearance details for student endpoints
+# This is very similar to the one in devices.py, consider consolidating to a utils.py
+async def _format_student_clearance_details_response(
+    db: SQLAlchemySessionType,
+    student_orm: models.Student
+) -> models.ClearanceDetail:
     
-    return ClearanceDetail(
-        student_id=student_info["student_id"],
-        name=student_info["name"],
-        department=student_info["department"],
-        clearance_items=clearance_items,
-        overall_status=overall_status
+    statuses_orm_list = await run_in_threadpool(crud.get_clearance_statuses_by_student_id, db, student_orm.student_id)
+    
+    clearance_items_models: List[models.ClearanceStatusItem] = []
+    overall_status_val = models.OverallClearanceStatusEnum.COMPLETED
+
+    if not statuses_orm_list:
+        overall_status_val = models.OverallClearanceStatusEnum.PENDING
+    
+    for status_orm in statuses_orm_list:
+        item = models.ClearanceStatusItem(
+            department=status_orm.department,
+            status=status_orm.status,
+            remarks=status_orm.remarks,
+            updated_at=status_orm.updated_at
+        )
+        clearance_items_models.append(item)
+        if item.status != models.ClearanceStatusEnum.COMPLETED:
+            overall_status_val = models.OverallClearanceStatusEnum.PENDING
+            
+    if not statuses_orm_list and overall_status_val == models.OverallClearanceStatusEnum.COMPLETED:
+         overall_status_val = models.OverallClearanceStatusEnum.PENDING
+
+    return models.ClearanceDetail(
+        student_id=student_orm.student_id,
+        name=student_orm.name,
+        department=student_orm.department,
+        clearance_items=clearance_items_models,
+        overall_status=overall_status_val
     )
 
-@router.post("/", response_model=Student, status_code=status.HTTP_201_CREATED, summary="Create a new student")
-async def create_student_endpoint(student: StudentCreate):
-    existing_student_by_id = await crud.get_student_by_student_id(student.student_id)
-    if existing_student_by_id:
-        raise HTTPException(status_code=400, detail="Student ID already registered")
-    existing_student_by_tag = await crud.get_student_by_tag_id(student.tag_id)
-    if existing_student_by_tag:
-        raise HTTPException(status_code=400, detail="Tag ID already assigned to another student")
-    return await crud.create_student(student)
-
-@router.get("/", response_model=List[Student], summary="Get all students")
-async def get_students_endpoint():
-    return await crud.get_all_students()
-
-@router.get("/{student_id}", response_model=ClearanceDetail, summary="Get clearance details for a specific student")
-async def get_student_clearance_endpoint(student_id: str):
-    student = await crud.get_student_by_student_id(student_id)
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    return await _get_formatted_clearance_details(student_id, student)
-
-@router.put("/{student_id}/link-tag", response_model=Student, summary="Link or update RFID tag for a student (Admin Only)")
-async def link_student_tag_endpoint(
-    student_id: str,
-    tag_link_request: TagLinkRequest,
-    current_admin: dict = Depends(get_current_active_admin_user_from_token) # Corrected dependency usage
+@router.post("/", response_model=models.StudentResponse, status_code=status.HTTP_201_CREATED)
+async def create_student_endpoint( # Async endpoint
+    student_data: models.StudentCreate,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token) # For logging
 ):
-    """
-    Links or updates the RFID tag_id for a specific student.
-    If the student already has a tag, it will be overwritten.
-    The new tag_id must be unique across all students and users.
-    Accessible only by authenticated admin users.
-    """
+    """Admin creates a new student. Uses ORM."""
     try:
-        updated_student = await crud.update_student_tag_id(student_id, tag_link_request.tag_id)
-        # crud.update_student_tag_id raises HTTPException on errors like not found or tag conflict
-        return updated_student
-    except HTTPException as e:
+        # crud.create_student is sync, handles checks and returns ORM model
+        created_student_orm = await run_in_threadpool(crud.create_student, db, student_data)
+    except HTTPException as e: # Catch known exceptions from CRUD (e.g., student_id exists)
         raise e
-    except Exception as e:
-        # Log error e
-        # print(f"Unexpected error in link_student_tag_endpoint: {e}") # Basic logging
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred while linking tag to student.")
+    return created_student_orm # Pydantic converts from ORM model
 
-# ... Add other student-related endpoints as needed ...
+@router.get("/", response_model=List[models.StudentResponse])
+async def get_students_endpoint( # Async endpoint
+    skip: int = 0,
+    limit: int = 100,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token)
+):
+    """Admin gets all students. Uses ORM."""
+    # crud.get_all_students is sync
+    students_orm_list = await run_in_threadpool(crud.get_all_students, db, skip, limit)
+    return students_orm_list # Pydantic converts list of ORM models
 
+@router.get("/{student_id_str}", response_model=models.ClearanceDetail)
+async def get_student_clearance_endpoint( # Async endpoint
+    student_id_str: str,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token)
+):
+    """Admin gets clearance details for a specific student. Uses ORM."""
+    # crud.get_student_by_student_id is sync
+    student_orm = await run_in_threadpool(crud.get_student_by_student_id, db, student_id_str)
+    if not student_orm:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return await _format_student_clearance_details_response(db, student_orm)
+
+@router.put("/{student_id_str}/link-tag", response_model=models.StudentResponse)
+async def link_student_tag_endpoint( # Async endpoint
+    student_id_str: str,
+    tag_link_request: models.TagLinkRequest,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token)
+):
+    """Admin links or updates RFID tag for a student. Uses ORM."""
+    try:
+        # crud.update_student_tag_id is sync, handles checks
+        updated_student_orm = await run_in_threadpool(crud.update_student_tag_id, db, student_id_str, tag_link_request.tag_id)
+    except HTTPException as e: # Catch known errors from CRUD
+        raise e
+    except Exception as e_generic:
+        print(f"Unexpected error in link_student_tag_endpoint: {e_generic}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+    return updated_student_orm

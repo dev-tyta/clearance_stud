@@ -1,89 +1,100 @@
 from fastapi import APIRouter, HTTPException, status, Depends
-from src import crud
-from src.models import ClearanceStatusCreate, ClearanceStatus, UserRole, ClearanceDetail # Added UserRole and ClearanceDetail
-from src.auth import get_current_staff_user, verify_department_access, authenticate_tag # Added verify_department_access, authenticate_tag
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session as SQLAlchemySessionType
+from typing import List, Optional # For type hinting
+
+from src import crud, models
+from src.auth import (
+    get_current_staff_or_admin_via_tag, # Returns ORM User model (Tag-based)
+    get_current_student_via_tag,        # Returns ORM Student model (Tag-based)
+    verify_department_access            # Sync utility function
+)
+from src.database import get_db
 
 router = APIRouter(
     prefix="/api/clearance",
     tags=["clearance"],
 )
 
-@router.post("/", response_model=ClearanceStatus, summary="Create or update a student's clearance status for a department by Staff/Admin")
-async def update_clearance_status_endpoint(
-    status_data: ClearanceStatusCreate,
-    current_user: dict = Depends(get_current_staff_user) # 1. Secure endpoint
+@router.post("/", response_model=models.ClearanceStatusResponse)
+async def update_clearance_status_endpoint( # Async endpoint
+    status_data: models.ClearanceStatusCreate,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_user_orm is User ORM model (staff/admin) via Tag-based auth
+    current_user_orm: models.User = Depends(get_current_staff_or_admin_via_tag)
 ):
     """
-    Creates a new clearance status entry for a student and department,
-    or updates an existing one.
-
-    Accessible only by authenticated Staff or Admin users.
-    Staff users can only update clearance for their assigned department.
+    Staff/Admin creates or updates a student's clearance status. Uses ORM.
     """
-    # Check if student exists
-    student = await crud.get_student_by_student_id(status_data.student_id)
-    if not student:
+    # crud.get_student_by_student_id is sync
+    student_orm = await run_in_threadpool(crud.get_student_by_student_id, db, status_data.student_id)
+    if not student_orm:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    # 2. Implement Department-Level Access Control
-    user_role = UserRole(current_user["role"]) # Cast to UserRole enum
-    user_department = current_user.get("department")
-    target_department = status_data.department
-
-    if not await verify_department_access(user_role, user_department, target_department):
+    # verify_department_access is sync
+    # status_data.department is ClearanceDepartment enum from Pydantic
+    if not verify_department_access(current_user_orm.role, current_user_orm.department, status_data.department):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"You do not have permission to update clearance for the {target_department.value} department."
+            detail=f"User '{current_user_orm.username}' does not have permission to update clearance for the {status_data.department.value} department."
         )
+    
+    cleared_by_user_pk = current_user_orm.id # User's primary key
 
-    # Create or update the clearance status, passing the current_user's ID as cleared_by
-    return await crud.create_or_update_clearance_status(status_data, cleared_by_user_id=current_user["id"])
+    try:
+        # crud.create_or_update_clearance_status is sync, returns ORM model
+        updated_status_orm = await run_in_threadpool(
+            crud.create_or_update_clearance_status, db, status_data, cleared_by_user_pk
+        )
+    except HTTPException as e: # Catch known errors from CRUD
+        raise e
+    return updated_status_orm # Pydantic converts from ORM model
 
-# 3. Endpoint for students to view their own clearance status
-@router.get("/me", response_model=ClearanceDetail, summary="Get own complete clearance status (for students)")
-async def get_my_clearance_status(
-    current_user_auth: dict = Depends(authenticate_tag) # Authenticate based on X-User-Tag-ID
+
+# Helper for student's own clearance view (similar to one in students.py/devices.py)
+async def _format_my_clearance_response(
+    db: SQLAlchemySessionType,
+    student_orm: models.Student # Expect Student ORM model
+) -> models.ClearanceDetail:
+    
+    statuses_orm_list = await run_in_threadpool(crud.get_clearance_statuses_by_student_id, db, student_orm.student_id)
+    
+    clearance_items_models: List[models.ClearanceStatusItem] = []
+    overall_status_val = models.OverallClearanceStatusEnum.COMPLETED
+
+    if not statuses_orm_list:
+        overall_status_val = models.OverallClearanceStatusEnum.PENDING
+    
+    for status_orm in statuses_orm_list:
+        item = models.ClearanceStatusItem(
+            department=status_orm.department,
+            status=status_orm.status,
+            remarks=status_orm.remarks,
+            updated_at=status_orm.updated_at
+        )
+        clearance_items_models.append(item)
+        if item.status != models.ClearanceStatusEnum.COMPLETED:
+            overall_status_val = models.OverallClearanceStatusEnum.PENDING
+            
+    if not statuses_orm_list and overall_status_val == models.OverallClearanceStatusEnum.COMPLETED:
+         overall_status_val = models.OverallClearanceStatusEnum.PENDING
+
+    return models.ClearanceDetail(
+        student_id=student_orm.student_id,
+        name=student_orm.name,
+        department=student_orm.department,
+        clearance_items=clearance_items_models,
+        overall_status=overall_status_val
+    )
+
+@router.get("/me", response_model=models.ClearanceDetail)
+async def get_my_clearance_status( # Async endpoint
+    # current_student_orm is Student ORM model via Tag-based auth
+    current_student_orm: models.Student = Depends(get_current_student_via_tag),
+    db: SQLAlchemySessionType = Depends(get_db)
 ):
     """
-    Retrieves the complete clearance status for the currently authenticated student.
-    The student is identified by their RFID tag ID passed in the 'X-User-Tag-ID' header.
+    Student retrieves their own complete clearance status via RFID Tag. Uses ORM.
     """
-    if current_user_auth.user_type != UserRole.student:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access restricted to students only."
-        )
+    return await _format_my_clearance_response(db, current_student_orm)
 
-    student_id = current_user_auth.user_id # This is student_id from TagAuth model
-
-    # Fetch student details
-    student_record = await crud.get_student_by_student_id(student_id)
-    if not student_record:
-        # This case should ideally not be reached if authenticate_tag was successful
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student record not found.")
-
-    # Fetch all clearance statuses for this student
-    clearance_statuses = await crud.get_clearance_statuses_by_student_id(student_id)
-
-    clearance_items = []
-    all_completed = True
-    if not clearance_statuses: # Handle case where student has no clearance entries yet (should be initialized)
-        all_completed = False # Or handle as per system logic, perhaps initialize them here if missing
-    
-    for status_item in clearance_statuses:
-        clearance_items.append({
-            "department": status_item["department"],
-            "status": status_item["status"],
-            "remarks": status_item["remarks"],
-            "updated_at": status_item["updated_at"]
-        })
-        if status_item["status"] != "COMPLETED":
-            all_completed = False
-
-    return ClearanceDetail(
-        student_id=student_record["student_id"],
-        name=student_record["name"],
-        department=student_record["department"],
-        clearance_items=clearance_items,
-        overall_status="COMPLETED" if all_completed and clearance_items else "PENDING"
-    )

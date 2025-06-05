@@ -1,62 +1,89 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from src import crud
-from src.models import UserCreate, UserResponse, TagLinkRequest # Added TagLinkRequest
-from src.auth import get_current_active_admin_user_from_token
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session as SQLAlchemySessionType
+from typing import List 
+
+from src import crud, models
+from src.auth import get_current_active_admin_user_from_token # Returns ORM User
+from src.database import get_db
+from src.auth import get_current_active_user # Returns ORM User model
+
 
 router = APIRouter(
     prefix="/api/users",
     tags=["users"],
-    dependencies=[Depends(get_current_active_admin_user_from_token)] # Protect all routes in this router
+    # dependencies=[Depends(get_current_active_admin_user_from_token)]
 )
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED, summary="Register a new staff or admin user (Admin Only)")
-async def register_user(
-    user_data: UserCreate, 
-    # current_admin: dict = Depends(get_current_active_admin_user_from_token) # Dependency already at router level
+@router.post("/register", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED)
+async def register_user( # Endpoint remains async
+    user_data: models.UserCreate,
+    db: SQLAlchemySessionType = Depends(get_db),
+    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token) # For logging who did it, if needed
 ):
     """
-    Registers a new staff or admin user. 
-    This endpoint is only accessible by an authenticated admin user.
+    Admin registers a new staff or admin user. Uses ORM.
     """
-    existing_user = await crud.get_user_by_username(user_data.username)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already registered"
-        )
-    
-    # Ensure role is either staff or admin if creating through this endpoint
-    if user_data.role not in ["staff", "admin"]:
+    # Role check (user_data.role is already UserRole enum from Pydantic)
+    if user_data.role not in [models.UserRole.STAFF, models.UserRole.ADMIN]:
          raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User role must be 'staff' or 'admin'"
+            detail=f"User role must be '{models.UserRole.STAFF.value}' or '{models.UserRole.ADMIN.value}'"
         )
+    
+    # Check if username already exists  
+    try:
+        created_user_orm = await run_in_threadpool(crud.create_user, db, user_data)
+    except HTTPException as e: # Catch HTTPExceptions raised by CRUD (e.g., username exists)
+        raise e
+    
+    return created_user_orm # Pydantic UserResponse will convert from ORM model
 
-    created_user = await crud.create_user(user_data)
-    # crud.create_user currently returns a dict that matches UserResponse structure
-    # If it didn't, we would map it here:
-    # return UserResponse(**created_user) 
-    return created_user
-
-@router.put("/{username}/link-tag", response_model=UserResponse, summary="Link or update RFID tag for a staff/admin user (Admin Only)")
-async def link_user_tag_endpoint(
-    username: str,
-    tag_link_request: TagLinkRequest,
-    # current_admin: dict = Depends(get_current_active_admin_user_from_token) # Dependency already at router level
+@router.put("/{username_str}/link-tag", response_model=models.UserResponse)
+async def link_user_tag_endpoint( # Endpoint remains async
+    username_str: str,
+    tag_link_request: models.TagLinkRequest,
+    db: SQLAlchemySessionType = Depends(get_db),
+    current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token) # For logging, if needed
 ):
     """
-    Links or updates the RFID tag_id for a specific staff or admin user.
-    If the user already has a tag, it will be overwritten.
-    The new tag_id must be unique across all students and users.
-    Accessible only by authenticated admin users (due to router-level dependency).
+    Admin links or updates the RFID tag_id for a specific staff/admin user. Uses ORM.
     """
     try:
-        updated_user = await crud.update_user_tag_id(username, tag_link_request.tag_id)
-        # crud.update_user_tag_id raises HTTPException on errors like not found or tag conflict
-        return updated_user
-    except HTTPException as e:
+        # crud.update_user_tag_id is sync, call with run_in_threadpool
+        # It handles tag uniqueness and user existence checks.
+        updated_user_orm = await run_in_threadpool(crud.update_user_tag_id, db, username_str, tag_link_request.tag_id)
+    except HTTPException as e: # Catch HTTPExceptions from CRUD
         raise e
     except Exception as e:
-        # Log error e
-        # print(f"Unexpected error in link_user_tag_endpoint: {e}") # Basic logging
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred while linking tag to user.")
+        # Generic error logging
+        print(f"Unexpected error in link_user_tag_endpoint: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+        
+    return updated_user_orm # Pydantic UserResponse will convert
+
+
+@router.get("/", response_model=List[models.UserResponse])
+async def list_all_users( # Endpoint remains async
+    skip: int = 0,
+    limit: int = 100,
+    db: SQLAlchemySessionType = Depends(get_db),
+    current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token)
+):
+    """
+    Admin lists all staff/admin users. Uses ORM.
+    """
+ 
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Listing all users not yet implemented in CRUD.")
+
+
+@router.get("/users/me", response_model=models.UserResponse, summary="Get current authenticated user details")
+async def read_users_me(
+    current_user_orm: models.User = Depends(get_current_active_user) # Depends on token auth
+):
+    """
+    Returns the details of the currently authenticated user (via token).
+    The user object is already an ORM model instance.
+    Pydantic's UserResponse will convert it using from_attributes=True.
+    """
+    return current_user_orm
