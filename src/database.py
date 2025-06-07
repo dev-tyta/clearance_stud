@@ -26,16 +26,7 @@ if not DATABASE_URL:
 # SQLAlchemy engine
 engine = sqlalchemy.create_engine(DATABASE_URL)
 
-# MetaData object from SQLAlchemy ORM Base (defined in models.py)
-# This metadata is populated by all ORM models inheriting from Base.
 metadata = Base.metadata
-
-# The `databases` library instance is no longer the primary way to interact
-# if we fully switch to SQLAlchemy ORM for all operations.
-# For a transition period or if some async raw SQL is still needed, it could be kept.
-# For this refactor, we're aiming to use SQLAlchemy ORM sessions.
-# import databases
-# database = databases.Database(DATABASE_URL) # Removing this as we shift to ORM sessions
 
 def create_db_tables():
     """Creates database tables based on SQLAlchemy ORM metadata."""
@@ -55,8 +46,6 @@ def initialize_student_clearance_statuses_orm(db: SQLAlchemySessionType, student
     Uses SQLAlchemy ORM session.
     """
     created_rows_info = []
-    # Fetch the student ORM object to ensure student_id_str is valid if needed,
-    # though clearance_statuses table uses student_id string directly.
     student = db.query(StudentORM).filter(StudentORM.student_id == student_id_str).first()
     if not student:
         print(f"Warning: Student {student_id_str} not found when trying to initialize clearance statuses.")
@@ -74,7 +63,6 @@ def initialize_student_clearance_statuses_orm(db: SQLAlchemySessionType, student
                 student_id=student_id_str,
                 department=dept_enum_member,
                 status=ClearanceStatusEnum.NOT_COMPLETED,
-                # remarks, cleared_by can be null or set later
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
@@ -83,14 +71,14 @@ def initialize_student_clearance_statuses_orm(db: SQLAlchemySessionType, student
         else:
             created_rows_info.append({"department": dept_enum_member.value, "status": "already_exists"})
     
-    if created_rows_info: # Only commit if new statuses were potentially added
+    if created_rows_info:
         try:
             db.commit()
-            # print(f"Committed clearance statuses for student {student_id_str}: {created_rows_info}")
+            print(f"Committed clearance statuses for student {student_id_str}: {created_rows_info}")
         except Exception as e:
             db.rollback()
             print(f"Error committing clearance statuses for student {student_id_str}: {e}")
-            raise # Re-raise after rollback
+            raise
     else:
         print(f"No new clearance statuses to initialize or commit for student {student_id_str}.")
 

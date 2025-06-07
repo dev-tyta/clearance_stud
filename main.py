@@ -3,9 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware # Keep if CORS is needed
 import uvicorn
 from contextlib import asynccontextmanager
 
-# Import create_db_tables from database.py
-from src.database import create_db_tables, get_db # get_db might not be used directly here but good to be aware of
-# Routers
+from src.database import create_db_tables, get_db 
 from src.routers import students, devices, clearance, token, users, admin
 
 @asynccontextmanager

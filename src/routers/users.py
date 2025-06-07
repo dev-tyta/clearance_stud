@@ -12,15 +12,13 @@ from src.auth import get_current_active_user # Returns ORM User model
 router = APIRouter(
     prefix="/api/users",
     tags=["users"],
-    # dependencies=[Depends(get_current_active_admin_user_from_token)]
 )
 
 @router.post("/register", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user( # Endpoint remains async
     user_data: models.UserCreate,
     db: SQLAlchemySessionType = Depends(get_db),
-    # current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token) # For logging who did it, if needed
-):
+   ):
     """
     Admin registers a new staff or admin user. Uses ORM.
     """
@@ -62,20 +60,18 @@ async def link_user_tag_endpoint( # Endpoint remains async
         
     return updated_user_orm # Pydantic UserResponse will convert
 
-
 @router.get("/", response_model=List[models.UserResponse])
-async def list_all_users( # Endpoint remains async
+async def list_all_users( 
     skip: int = 0,
     limit: int = 100,
     db: SQLAlchemySessionType = Depends(get_db),
-    current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token)
 ):
     """
-    Admin lists all staff/admin users. Uses ORM.
+    Admin lists all staff/admin users with pagination. Uses ORM.
     """
- 
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Listing all users not yet implemented in CRUD.")
-
+    # crud.get_users is sync, call with run_in_threadpool
+    users_orm_list = await run_in_threadpool(crud.get_users, db, skip, limit)
+    return users_orm_list # Pydantic will convert the list of ORM User models
 
 @router.get("/users/me", response_model=models.UserResponse, summary="Get current authenticated user details")
 async def read_users_me(
