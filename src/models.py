@@ -9,9 +9,7 @@ import os
 
 Base = declarative_base()
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-default-secret-key-for-dev-only-CHANGE-ME")
-if JWT_SECRET_KEY == "your-default-secret-key-for-dev-only-CHANGE-ME":
-    print("WARNING: Using default JWT_SECRET_KEY. Please set a strong JWT_SECRET_KEY environment variable for production.")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 # Enums - Values must EXACTLY match the labels in the PostgreSQL ENUM types, case-sensitively.
 class UserRole(str, enum.Enum):

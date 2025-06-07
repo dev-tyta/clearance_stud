@@ -9,3 +9,7 @@ python-dotenv
 sqlalchemy
 supabase
 psycopg2-binary
+bcrypt
+python-multipart
+python-jose
+streamlit
