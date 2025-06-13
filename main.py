@@ -1,4 +1,5 @@
-from fastapi import FastAPI, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware # Keep if CORS is needed
 import uvicorn
@@ -25,16 +26,16 @@ app = FastAPI(
     A comprehensive API for managing student clearance processes with RFID authentication.
     
     ## Features
-    * **RFID Authentication** - Students and staff use RFID tags for quick access
-    * **Multi-Department Clearance** - Support for Library, Bursary, Alumni, and Departmental clearances
-    * **Device Management** - ESP32 RFID readers with secure API key authentication
-    * **Role-Based Access** - Different permissions for Students, Staff, and Administrators
-    * **Real-Time Tracking** - Live clearance status updates and comprehensive logging
+    * RFID Authentication - Students and staff use RFID tags for quick access
+    * Multi-Department Clearance - Support for Library, Bursary, Alumni, and Departmental clearances
+    * Device Management - ESP32 RFID readers with secure API key authentication
+    * Role-Based Access - Different permissions for Students, Staff, and Administrators
+    * Real-Time Tracking - Live clearance status updates and comprehensive logging
     
     ## Authentication Methods
-    * **JWT Tokens** - For web interface and administrative access
-    * **RFID Tags** - For quick student and staff authentication
-    * **Device API Keys** - For ESP32 RFID reader authentication
+    * JWT Tokens - For web interface and administrative access
+    * RFID Tags - For quick student and staff authentication
+    * Device API Keys - For ESP32 RFID reader authentication
     """,
     version="2.0.0",
     lifespan=lifespan,
