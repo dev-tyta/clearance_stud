@@ -119,7 +119,7 @@ def login_page():
                 if login_response.status_code == 200:
                     token_data = login_response.json()
                     st.session_state.access_token = token_data.get("access_token")
-                    user_me_response = api_request("GET", "/users/users/me", token=st.session_state.access_token)
+                    user_me_response = api_request("GET", "/token/users/me", token=st.session_state.access_token)
                     if user_me_response and user_me_response.status_code == 200:
                         st.session_state.user_info = user_me_response.json()
                         st.success("Login successful!")
