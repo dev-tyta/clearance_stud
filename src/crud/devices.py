@@ -72,3 +72,7 @@ def delete_device(db: Session, device_id: int) -> Optional[Device]:
     db.delete(db_device)
     db.commit()
     return db_device
+
+def get_device_by_location(db: Session, location: str) -> Optional[Device]:
+    """Retrieves a device by its location."""
+    return db.exec(select(Device).where(Device.location == location)).first()

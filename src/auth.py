@@ -3,6 +3,9 @@ from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlmodel import Session, select
 from typing import List, Optional
+from typing import List, Optional
+from datetime import datetime, timedelta
+
 
 from src.config import settings
 from src.database import get_session
@@ -15,17 +18,32 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=True)
 
 # --- JWT Token Functions ---
-def create_access_token(data: dict):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
 # --- Password Hashing ---
-def verify_password(plain_password, hashed_password):
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     return settings.PWD_CONTEXT.verify(plain_password, hashed_password)
 
-def hash_password(password):
+def hash_password(password: str) -> str:
     return settings.PWD_CONTEXT.hash(password)
+
+# --- User Authentication ---
+def authenticate_user(db: Session, username: str, password: str):
+    """Authenticate user by username and password."""
+    user = user_crud.get_user_by_username(db, username=username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
 
 # --- Dependency for API Key Authentication ---
 
