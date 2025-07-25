@@ -1,85 +1,50 @@
+"""
+Router for managing users (staff, admins).
+"""
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session as SQLAlchemySessionType
-from typing import List 
+from sqlalchemy.orm import Session
+from typing import List
 
 from src import crud, models
-from src.auth import get_current_active_admin_user_from_token # Returns ORM User
 from src.database import get_db
-from src.auth import get_current_active_user # Returns ORM User model
-
+from src.auth import get_current_active_user, get_current_active_admin_user_from_token
 
 router = APIRouter(
     prefix="/api/users",
-    tags=["users"],
+    tags=["Users"],
 )
 
-@router.post("/register", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED)
-async def register_user( # Endpoint remains async
-    user_data: models.UserCreate,
-    db: SQLAlchemySessionType = Depends(get_db),
-   ):
+@router.post("/", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(get_current_active_admin_user_from_token)])
+async def create_new_user(user: models.UserCreate, db: Session = Depends(get_db)):
     """
-    Admin registers a new staff or admin user. Uses ORM.
+    Admin: Create a new user (staff or admin).
     """
-    # Role check (user_data.role is already UserRole enum from Pydantic)
-    if user_data.role not in [models.UserRole.STAFF, models.UserRole.ADMIN]:
-         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"User role must be '{models.UserRole.STAFF.value}' or '{models.UserRole.ADMIN.value}'"
-        )
-    
-    # Check if username already exists  
-    try:
-        created_user_orm = await run_in_threadpool(crud.create_user, db, user_data)
-    except HTTPException as e: # Catch HTTPExceptions raised by CRUD (e.g., username exists)
-        raise e
-    
-    return created_user_orm # Pydantic UserResponse will convert from ORM model
+    db_user = await run_in_threadpool(crud.get_user_by_username, db, user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    return await run_in_threadpool(crud.create_user, db, user)
 
-@router.put("/{username_str}/link-tag", response_model=models.UserResponse)
-async def link_user_tag_endpoint( # Endpoint remains async
-    username_str: str,
-    tag_link_request: models.TagLinkRequest,
-    db: SQLAlchemySessionType = Depends(get_db),
-    current_admin_orm: models.User = Depends(get_current_active_admin_user_from_token) # For logging, if needed
-):
+@router.get("/", response_model=List[models.UserResponse], dependencies=[Depends(get_current_active_admin_user_from_token)])
+async def read_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     """
-    Admin links or updates the RFID tag_id for a specific staff/admin user. Uses ORM.
+    Admin: Retrieve a list of all users.
     """
-    try:
-        # crud.update_user_tag_id is sync, call with run_in_threadpool
-        # It handles tag uniqueness and user existence checks.
-        updated_user_orm = await run_in_threadpool(crud.update_user_tag_id, db, username_str, tag_link_request.tag_id)
-    except HTTPException as e: # Catch HTTPExceptions from CRUD
-        raise e
-    except Exception as e:
-        # Generic error logging
-        print(f"Unexpected error in link_user_tag_endpoint: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
-        
-    return updated_user_orm # Pydantic UserResponse will convert
+    users = await crud.get_all_users(db, skip=skip, limit=limit) # Assumes get_all_users exists in crud.users
+    return users
 
-@router.get("/", response_model=List[models.UserResponse])
-async def list_all_users( 
-    skip: int = 0,
-    limit: int = 100,
-    db: SQLAlchemySessionType = Depends(get_db),
-):
+@router.get("/all", response_model=list[models.UserResponse], dependencies=[Depends(get_current_active_admin_user_from_token)])
+async def get_all_users(db: Session = Depends(get_db)):
     """
-    Admin lists all staff/admin users with pagination. Uses ORM.
+    Admin: Get a list of all users.
     """
-    # crud.get_users is sync, call with run_in_threadpool
-    users_orm_list = await run_in_threadpool(crud.get_users, db, skip, limit)
-    return users_orm_list # Pydantic will convert the list of ORM User models
+    users = await run_in_threadpool(crud.get_all_users, db)
+    return users
 
-@router.get("/users/me", response_model=models.UserResponse, summary="Get current authenticated user details")
-async def read_users_me(
-    current_user_orm: models.User = Depends(get_current_active_user) # Depends on token auth
-):
+@router.get("/me", response_model=models.UserResponse)
+async def read_users_me(current_user: models.User = Depends(get_current_active_user)):
     """
-    Returns the details of the currently authenticated user (via token).
-    The user object is already an ORM model instance.
-    Pydantic's UserResponse will convert it using from_attributes=True.
+    Get profile information for the currently authenticated user.
     """
-    return current_user_orm
+    return current_user
+

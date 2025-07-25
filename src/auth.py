@@ -3,12 +3,14 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.concurrency import run_in_threadpool # For calling sync crud in async auth
 from sqlalchemy.orm import Session as SQLAlchemySessionType
 
-from src import crud, models
+from src import crud, models 
+
 from src.database import get_db
 from typing import Optional, Dict, Any # Added Any
 from datetime import datetime, timedelta
-import jwt
 from typing import Union # For type hinting
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 # JWT Configuration - Loaded from models.py (which loads from .env)
 SECRET_KEY = models.JWT_SECRET_KEY
@@ -16,6 +18,24 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token/login") # Path to token endpoint
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") # Password hashing context
+# Password hashing context from models.py
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verifies a plain password against a hashed password.
+    Uses the CryptContext to verify the password.
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """
+    Hashes a password using the CryptContext.
+    This is used when creating or updating user passwords.
+    """
+    return pwd_context.hash(password)
+
 
 # --- JWT Helper Functions ---
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -98,6 +118,27 @@ async def get_verified_device(
     if not device_orm.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Device is not active.")
     return device_orm
+
+
+def authenticate_user(
+    username: str,
+    password: str,
+    db: SQLAlchemySessionType = Depends(get_db)
+) -> models.User: # Returns ORM User model
+    """
+    Authenticates a user by username and password.
+    Returns the ORM User model if successful, raises HTTPException otherwise.
+    """
+    user = crud.get_user_by_username(db, username)
+    
+    if not user:
+        return None  # User not found, return None
+    
+    is_password_valid = verify_password(password, user.hashed_password)
+    if not is_password_valid:
+        return None
+
+    return user  # Return the ORM User model if password is valid
 
 # Tag-based authentication (User/Student Authentication via RFID tag)
 async def authenticate_tag_user_or_student( # Renamed for clarity

@@ -1,49 +1,45 @@
+"""
+Router for handling user authentication and issuing JWT tokens.
+"""
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.concurrency import run_in_threadpool # To call sync CRUD in async endpoint
-from sqlalchemy.orm import Session as SQLAlchemySessionType
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
+from datetime import timedelta
 
-from src import crud, models # crud now contains sync ORM functions
-from src.auth import create_access_token # JWT creation is sync
-from src.database import get_db # Dependency for SQLAlchemy session
+from src import models
+from src.database import get_db
+from src.auth import create_access_token, authenticate_user
+from src.config import settings
 
 router = APIRouter(
-    prefix="/api/token",
-    tags=["authentication"],
+    prefix="/api",
+    tags=["Authentication Token"]
 )
 
-@router.post("/login", response_model=models.Token)
-async def login_for_access_token( # Endpoint remains async
+@router.post("/token", response_model=models.Token)
+async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: SQLAlchemySessionType = Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     """
-    Provides an access token for an authenticated staff or admin user.
-    Requires username and password. Uses ORM.
-    """
-    # crud.get_user_by_username is now sync, call with run_in_threadpool
-    user = await run_in_threadpool(crud.get_user_by_username, db, form_data.username)
+    Provides a JWT token for authenticated users.
     
+    This is the primary login endpoint. It takes a username and password
+    and returns an access token if the credentials are valid.
+    """
+    user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    # crud.verify_password is sync
-    is_password_valid = await run_in_threadpool(crud.verify_password, form_data.password, user.hashed_password)
-    if not is_password_valid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user")
-        
-    access_token = create_access_token( # create_access_token is sync
-        data={"sub": user.username, "role": user.role.value} # user.role is UserRole enum
+    
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role.value},
+        expires_delta=access_token_expires
     )
+    
     return {"access_token": access_token, "token_type": "bearer"}
