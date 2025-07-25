@@ -1,358 +1,330 @@
 import streamlit as st
 import requests
+from typing import List, Dict, Optional, Any
 import pandas as pd
-from typing import Dict, Any, Optional, List
+import time
 
 # --- Configuration ---
-# IMPORTANT: Change this URL to your hosted backend's URL if it's not running locally.
-API_BASE_URL = "https://testys-clearance-sys.hf.space/api"
+API_BASE_URL = "https://testys-clearance-sys.hf.space"  # Replace with your deployed backend URL
 
-# --- Page Setup ---
-st.set_page_config(
-    page_title="Clearance System",
-    page_icon="✅",
-    layout="wide",
-)
+# --- API Client ---
+class APIClient:
+    """A client to interact with the FastAPI backend."""
 
-# --- Helper Functions ---
-def api_request(
-    method: str,
-    endpoint: str,
-    data: Optional[Dict[str, Any]] = None,
-    params: Optional[Dict[str, Any]] = None,
-    token: Optional[str] = None,
-    x_api_key: Optional[str] = None,
-    x_user_tag_id: Optional[str] = None,
-) -> requests.Response:
-    """A centralized function to make HTTP requests to the FastAPI backend."""
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if x_api_key:
-        headers["X-API-KEY"] = x_api_key
-    if x_user_tag_id:
-        headers["X-User-Tag-ID"] = x_user_tag_id
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.headers = {"Content-Type": "application/json"}
+        # Always use the latest token from session state if it exists
+        if "token" in st.session_state and st.session_state.token:
+            self.headers["Authorization"] = f"Bearer {st.session_state.token}"
 
-    url = f"{API_BASE_URL}{endpoint}"
-    try:
-        if method.upper() == "GET":
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-        elif method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=data, params=params, timeout=10)
-        elif method.upper() == "PUT":
-            response = requests.put(url, headers=headers, json=data, params=params, timeout=10)
+    def _handle_response(self, response: requests.Response) -> Optional[Dict[str, Any]]:
+        """Handles HTTP responses, showing errors in Streamlit."""
+        if 200 <= response.status_code < 300:
+            if response.status_code == 204: # No Content
+                return {"status": "success"}
+            return response.json()
         else:
-            st.error(f"Unsupported HTTP method: {method}")
-            return None
-        return response
-    except requests.exceptions.ConnectionError:
-        st.error(f"Connection Error: Could not connect to the API at {url}. Please ensure the backend is running and accessible.")
-        return None
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        return None
-
-def handle_api_response(response: Optional[requests.Response], success_status_code: int = 200, display_success_json=True):
-    """Displays success or error messages based on API response."""
-    if response and response.status_code == success_status_code:
-        st.success("Operation successful!")
-        if display_success_json:
             try:
-                if response.text:
-                    st.json(response.json())
-                else:
-                    st.info("Request successful with no content returned.")
+                error_data = response.json()
+                detail = error_data.get("detail", "Unknown error")
+                # Don't show auth errors on every check, only on explicit actions
+                if response.status_code not in [401, 403]:
+                    st.error(f"API Error ({response.status_code}): {detail}")
             except requests.exceptions.JSONDecodeError:
-                st.code(response.text)
-    elif response:
-        st.error(f"Error: {response.status_code}")
-        try:
-            st.json(response.json())
-        except requests.exceptions.JSONDecodeError:
-            st.code(response.text)
-    else:
-        # Error from connection issues is already displayed by api_request
-        pass
+                 if response.status_code not in [401, 403]:
+                    st.error(f"API Error ({response.status_code}): {response.text}")
+            return None
 
+    def login(self, username, password) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/token"
+        data = {"username": username, "password": password}
+        response = requests.post(url, data=data) # Form data for token endpoint
+        # Handle login response separately to show specific errors
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error("Login failed. Please check your username and password.")
+            return None
 
-# --- Initialize session state variables ---
-if "access_token" not in st.session_state:
-    st.session_state.access_token = None
-if "user_info" not in st.session_state:
-    st.session_state.user_info = None
-if "device_api_key" not in st.session_state:
-    st.session_state.device_api_key = ""
-if "tag_id_for_header" not in st.session_state:
-    st.session_state.tag_id_for_header = ""
+    def get_current_user(self) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/users/me"
+        # Ensure headers are updated for this specific call
+        if "token" in st.session_state and st.session_state.token:
+            self.headers["Authorization"] = f"Bearer {st.session_state.token}"
+            response = requests.get(url, headers=self.headers)
+            return self._handle_response(response)
+        return None
 
+    def get_all_students(self) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/students/"
+        response = requests.get(url, headers=self.headers)
+        data = self._handle_response(response)
+        return data if data else []
 
-# --- Page Definitions ---
+    def create_student(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/students/"
+        response = requests.post(url, json=data, headers=self.headers)
+        return self._handle_response(response)
+    
+    def lookup_student(self, matric_no: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/students/lookup?matric_no={matric_no}"
+        response = requests.get(url, headers=self.headers)
+        return self._handle_response(response)
 
-def login_page():
-    st.header("👤 User Login (Staff/Admin)")
-    st.markdown("Log in to get a JWT token for accessing protected admin endpoints.")
+    def update_clearance(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/clearance/"
+        response = requests.put(url, json=data, headers=self.headers)
+        return self._handle_response(response)
 
-    if st.session_state.access_token and st.session_state.user_info:
-        user = st.session_state.user_info
-        role_display = user.get('role')
-        if isinstance(role_display, dict):
-            role_display = role_display.get('value', 'N/A')
-        st.success(f"Logged in as **{user.get('username')}** (Role: **{role_display}**)")
-        if st.button("Logout"):
-            st.session_state.access_token = None
-            st.session_state.user_info = None
-            st.rerun()
-        return
+    def link_tag(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/tags/link"
+        response = requests.post(url, json=data, headers=self.headers)
+        return self._handle_response(response)
 
+    def unlink_tag(self, tag_id: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/tags/{tag_id}/unlink"
+        response = requests.delete(url, headers=self.headers)
+        return self._handle_response(response)
+        
+    def get_all_devices(self) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/devices/"
+        response = requests.get(url, headers=self.headers)
+        data = self._handle_response(response)
+        return data if data else []
+
+    def create_device(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/admin/devices/"
+        response = requests.post(url, json=data, headers=self.headers)
+        return self._handle_response(response)
+
+    def activate_scanner(self, device_id: int) -> bool:
+        url = f"{self.base_url}/admin/scanners/activate"
+        response = requests.post(url, json={"device_id": device_id}, headers=self.headers)
+        if not (200 <= response.status_code < 300):
+            self._handle_response(response) # Show error
+        return response.status_code == 204
+
+    def retrieve_scanned_tag(self) -> Optional[str]:
+        url = f"{self.base_url}/admin/scanners/retrieve"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 404: # It's okay if no tag is found yet
+            return None
+        data = self._handle_response(response)
+        return data.get("tag_id") if data else None
+
+# --- Main App ---
+
+st.set_page_config(page_title="Clearance System Dashboard", layout="wide")
+
+# Initialize API client. Re-initialized on each run to get latest token.
+client = APIClient(API_BASE_URL)
+
+def show_login_page():
+    st.title("Admin & Staff Login")
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", use_container_width=True)
+        submitted = st.form_submit_button("Login")
 
         if submitted:
-            if not username or not password:
-                st.error("Username and password are required.")
-                return
-            form_data_payload = {'username': username, 'password': password}
-            try:
-                login_response = requests.post(f"{API_BASE_URL}/token/login", data=form_data_payload)
-                if login_response.status_code == 200:
-                    token_data = login_response.json()
-                    st.session_state.access_token = token_data.get("access_token")
-                    user_me_response = api_request("GET", "/token/users/me", token=st.session_state.access_token)
-                    if user_me_response and user_me_response.status_code == 200:
-                        st.session_state.user_info = user_me_response.json()
-                        st.success("Login successful!")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to fetch user details: {user_me_response.text if user_me_response else 'No response'}")
-                        st.session_state.access_token = None
-                else:
-                    st.error(f"Login failed: {login_response.json().get('detail', 'Unknown error')}")
-            except Exception as e:
-                st.error(f"An error occurred during login: {e}")
+            response = client.login(username, password)
+            if response and "access_token" in response:
+                st.session_state.token = response["access_token"]
+                st.session_state.user = None # Force re-fetch of user
+                st.rerun()
 
-
-def admin_management_page():
-    st.header("👑 Admin Panel")
-    if not st.session_state.access_token or not st.session_state.user_info:
-        st.warning("Please log in as an Admin to access this page.")
-        return
-
-    user_role = st.session_state.user_info.get('role')
-    actual_role_value = user_role if isinstance(user_role, str) else (user_role.get('value') if isinstance(user_role, dict) else None)
-    if actual_role_value != 'admin':
-        st.warning("Access Denied. You must be an Admin.")
-        return
-
-    token = st.session_state.access_token
-    admin_tabs = st.tabs([
-        "Manage Users", "Manage Students", "Manage Devices", 
-        "View All Users", "View All Students", "View All Devices"
-    ])
-
-    with admin_tabs[0]: # Manage Users
-        st.subheader("Register New Staff/Admin User")
-        with st.form("register_user_form", clear_on_submit=True):
-            cols = st.columns(2)
-            user_data = {
-                "username": cols[0].text_input("Username"),
-                "password": cols[1].text_input("Password", type="password"),
-                "role": cols[0].selectbox("Role", ["STAFF", "ADMIN"]),
-                "department": cols[1].selectbox("Department", ["DEPARTMENTAL", "LIBRARY", "BURSARY", "ALUMNI"], index=None, placeholder="Select department (for Staff)"),
-                "tag_id": cols[0].text_input("Tag ID (Optional)"),
-                "is_active": True
-            }
-            if st.form_submit_button("Register User", use_container_width=True):
-                user_data["tag_id"] = user_data["tag_id"] or None
-                response = api_request("POST", "/users/register", data=user_data, token=token)
-                handle_api_response(response, 201)
-
-    with admin_tabs[1]: # Manage Students
-        st.subheader("Create New Student")
-        with st.form("create_student_form", clear_on_submit=True):
-            cols = st.columns(2)
-            student_data = {
-                "student_id": cols[0].text_input("Student ID (Matric No.)"),
-                "name": cols[1].text_input("Full Name"),
-                "email": cols[0].text_input("Email"),
-                "department": cols[1].text_input("Department (e.g., Computer Science)"),
-                "tag_id": cols[0].text_input("Tag ID (Optional)")
-            }
-            if st.form_submit_button("Create Student", use_container_width=True):
-                student_data["tag_id"] = student_data["tag_id"] or None
-                response = api_request("POST", "/students/", data=student_data, token=token)
-                handle_api_response(response, 201)
-
-        st.subheader("Get Specific Student's Clearance")
-        with st.form("get_student_clearance_form"):
-            stud_id_to_view = st.text_input("Enter Student ID to View Clearance")
-            if st.form_submit_button("Fetch Clearance", use_container_width=True):
-                 response = api_request("GET", f"/students/{stud_id_to_view}", token=token)
-                 handle_api_response(response)
-
-    with admin_tabs[2]: # Manage Devices
-        st.subheader("Register New Device")
-        with st.form("admin_register_device_form", clear_on_submit=True):
-            device_data = {
-                "name": st.text_input("Device Name (e.g., Library Scanner 1)"),
-                "location": st.text_input("Device Location"),
-                "device_id": st.text_input("Device Hardware ID (Optional)"),
-                "description": st.text_area("Description")
-            }
-            if st.form_submit_button("Register Device", use_container_width=True):
-                device_data["device_id"] = device_data["device_id"] or None
-                response = api_request("POST", "/admin/devices/", data=device_data, token=token)
-                handle_api_response(response, 201)
-        
-        st.subheader("Prepare Device for Tag Linking")
-        with st.form("prepare_tag_link_form", clear_on_submit=True):
-            prepare_data = {
-                "device_identifier": st.text_input("Device Identifier (Hardware ID or DB PK)"),
-                "target_user_type": st.selectbox("Target User Type", ["STUDENT", "STAFF_ADMIN"]),
-                "target_identifier": st.text_input("Target Identifier (Student ID or Username)")
-            }
-            if st.form_submit_button("Prepare Device", use_container_width=True):
-                response = api_request("POST", "/admin/prepare-device-tag-link", data=prepare_data, token=token)
-                handle_api_response(response, 202)
-
-    with admin_tabs[3]: # View All Users
-        st.subheader("List of All Staff/Admin Users")
-        if st.button("Fetch All Users", use_container_width=True):
-            response = api_request("GET", "/users/", token=token)
-            if response and response.status_code == 200:
-                st.success("Users retrieved successfully!")
-                df = pd.DataFrame(response.json())
-                st.dataframe(df.drop(columns=['hashed_password'], errors='ignore'))
-            else:
-                handle_api_response(response)
-
-    with admin_tabs[4]: # View All Students
-        st.subheader("List of All Students")
-        if st.button("Fetch All Students", use_container_width=True):
-            response = api_request("GET", "/students/", token=token)
-            if response and response.status_code == 200:
-                st.success("Students retrieved successfully!")
-                st.dataframe(pd.DataFrame(response.json()))
-            else:
-                handle_api_response(response)
+def display_student_dashboard():
+    st.header("Student Clearance Management")
     
-    with admin_tabs[5]: # View All Devices
-        st.subheader("List of All Devices")
-        if st.button("Fetch All Devices", use_container_width=True):
-            response = api_request("GET", "/admin/devices/", token=token)
-            if response and response.status_code == 200:
-                st.success("Devices retrieved successfully!")
-                st.dataframe(pd.DataFrame(response.json()))
-            else:
-                handle_api_response(response)
-
-def staff_actions_page():
-    st.header("👨‍🏫 Staff Actions (Tag-Based)")
-    st.info("These actions simulate using a device or terminal where authentication is based on your RFID tag ID, not a login token.")
-    
-    tag_id = st.text_input("Your Staff Tag ID (Used for 'X-User-Tag-ID' Header)")
-    if not tag_id:
-        st.warning("Please enter your Staff Tag ID to proceed.")
-        return
-
     st.subheader("Update Student Clearance")
-    with st.form("update_clearance_form"):
-        update_stud_id = st.text_input("Student ID to Update")
-        update_dept = st.selectbox("Department", ["DEPARTMENTAL", "LIBRARY", "BURSARY", "ALUMNI"])
-        update_status = st.selectbox("New Status", ["COMPLETED", "NOT_COMPLETED", "PENDING"])
-        update_remarks = st.text_area("Remarks (Optional)")
-        if st.form_submit_button("Update Clearance Status", use_container_width=True):
-            clearance_data = { "student_id": update_stud_id, "department": update_dept, "status": update_status, "remarks": update_remarks }
-            response = api_request("POST", "/clearance/", data=clearance_data, x_user_tag_id=tag_id)
-            handle_api_response(response)
-
-def student_actions_page():
-    st.header("👨‍🎓 Student Actions (Tag-Based)")
-    st.info("Use your student RFID tag to view your clearance status.")
     
-    tag_id = st.text_input("Your Student Tag ID (Used for 'X-User-Tag-ID' Header)")
-    if st.button("View My Clearance Status", use_container_width=True):
-        if not tag_id:
-            st.error("Please enter your Student Tag ID.")
-            return
-        response = api_request("GET", "/clearance/me", x_user_tag_id=tag_id)
-        handle_api_response(response)
+    matric_no_input = st.text_input("Enter Matriculation Number to find a student", key="lookup_matric")
+    if matric_no_input:
+        student = client.lookup_student(matric_no_input)
+        st.session_state.selected_student = student # Store result, even if None
+                
+    if 'selected_student' in st.session_state and st.session_state.selected_student:
+        student = st.session_state.selected_student
+        st.success(f"Found Student: **{student['full_name']}** (Matric: {student['matric_no']})")
 
-def device_simulation_page():
-    st.header("📟 Device Simulation (ESP32)")
-    st.info("Simulate an ESP32 device registering itself, scanning tags, and completing tag links.")
-
-    st.subheader("1. Device Self-Registration")
-    with st.form("device_self_reg_form"):
-        sim_dev_hw_id = st.text_input("Device Hardware ID (e.g., 'ESP32-LIB-01')")
-        sim_dev_loc = st.text_input("Device Location (e.g., 'Main Library Entrance')")
-        if st.form_submit_button("Register This Device", use_container_width=True):
-            response = api_request("POST", "/devices/register", data={"device_id": sim_dev_hw_id, "location": sim_dev_loc})
-            if response and response.status_code == 200:
-                api_key_data = response.json()
-                st.session_state.device_api_key = api_key_data.get("api_key")
-                st.success(f"Device '{sim_dev_hw_id}' registered. API Key received and stored in session.")
-                st.code(st.session_state.device_api_key, language="text")
+        statuses = student.get('clearance_statuses', [])
+        if statuses:
+            df = pd.DataFrame(statuses)
+            st.write("Current Clearance Status:")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No clearance records found for this student.")
+        
+        with st.form("clearance_update_form"):
+            st.write("Select department to update:")
+            departments = [s['department'] for s in statuses] if statuses else []
+            if not departments:
+                 st.warning("Cannot update status as no clearance departments are listed.")
+                 st.form_submit_button("Update Status", disabled=True)
             else:
-                handle_api_response(response)
+                dept_to_update = st.selectbox("Department", options=departments)
+                new_status = st.selectbox("New Status", options=["approved", "rejected", "pending"])
+                remarks = st.text_area("Remarks (Optional)")
+                
+                submitted = st.form_submit_button("Update Status")
+                if submitted:
+                    update_data = {
+                        "matric_no": student['matric_no'],
+                        "department": dept_to_update,
+                        "status": new_status,
+                        "remarks": remarks
+                    }
+                    result = client.update_clearance(update_data)
+                    if result:
+                        st.success(f"Successfully updated {dept_to_update} to {new_status}.")
+                        st.session_state.selected_student = client.lookup_student(student['matric_no'])
+                        st.rerun()
 
-    st.markdown("---")
-    st.subheader("2. Device Actions")
-    st.session_state.device_api_key = st.text_input("Device API Key (X-API-KEY)", value=st.session_state.device_api_key)
+def display_rfid_dashboard():
+    st.header("RFID Tag Management")
     
-    if not st.session_state.device_api_key:
-        st.warning("Register a device or enter an API key to perform actions.")
+    # Initialize session state for the scanning workflow
+    if 'scan_active' not in st.session_state:
+        st.session_state.scan_active = False
+
+    devices = client.get_all_devices()
+    if not devices:
+        st.warning("No RFID scanners registered. Please add one in the Device Management panel.")
         return
 
-    action_tabs = st.tabs(["Scan Student Tag", "Submit Scanned Tag (for Linking)"])
+    device_options = {f"{d['device_name']} ({d['location']})": d['id'] for d in devices}
+    selected_device_name = st.selectbox("Select your desk scanner", options=device_options.keys())
     
-    with action_tabs[0]:
-        st.write("Scan a student's tag to check their overall clearance status.")
-        with st.form("device_scan_tag_form", clear_on_submit=True):
-            scan_dev_hw_id_payload = st.text_input("Device Hardware ID (must match key's device)")
-            scan_tag_id_student = st.text_input("Student Tag ID to Scan")
-            if st.form_submit_button("Simulate Scan", use_container_width=True):
-                scan_payload = {"device_id": scan_dev_hw_id_payload, "tag_id": scan_tag_id_student}
-                response = api_request("POST", "/scan", data=scan_payload, x_api_key=st.session_state.device_api_key)
-                handle_api_response(response)
+    st.subheader("Link Tag to Student")
 
-    with action_tabs[1]:
-        st.write("Submit a tag that has just been scanned after an admin prepared this device for linking.")
-        with st.form("device_submit_scanned_tag_form", clear_on_submit=True):
-            submit_scanned_tag_val = st.text_input("Tag ID Scanned by Device")
-            if st.form_submit_button("Submit Scanned Tag", use_container_width=True):
-                submit_payload = {"scanned_tag_id": submit_scanned_tag_val}
-                response = api_request("POST", "/devices/submit-scanned-tag", data=submit_payload, x_api_key=st.session_state.device_api_key)
-                handle_api_response(response)
+    # This block shows the UI when the scanner is armed and waiting for a card tap.
+    if st.session_state.scan_active:
+        st.info("Scanner is active. Please tap a card on the selected device now.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Fetch Scanned Card"):
+                tag_id = client.retrieve_scanned_tag()
+                if tag_id:
+                    st.session_state.scanned_tag_id = tag_id
+                    st.session_state.scan_active = False  # Deactivate after successful fetch
+                    st.success(f"Card Scanned! Tag ID: `{tag_id}`")
+                    st.rerun()
+                else:
+                    st.warning("No card has been scanned yet. Please tap a card on the device and try again.")
+        with col2:
+            if st.button("Cancel Scan"):
+                st.session_state.scan_active = False
+                st.rerun()
+    # This block shows the default UI to start the process.
+    else:
+        if st.button("Activate Scanner for Next Scan"):
+            device_id = device_options[selected_device_name]
+            if client.activate_scanner(device_id):
+                st.session_state.scan_active = True
+                st.rerun()  # Rerun to show the "active" state UI
+        
+    # This block appears after a tag has been successfully scanned and retrieved.
+    if 'scanned_tag_id' in st.session_state:
+        tag_id = st.session_state.scanned_tag_id
+        st.info(f"Ready to link Tag ID: `{tag_id}`")
 
+        with st.form("link_tag_form"):
+            matric_to_link = st.text_input("Enter Matriculation Number to link this tag to")
+            submitted = st.form_submit_button("Link Tag")
 
-# --- Main App Logic with Sidebar Navigation ---
-st.sidebar.title("Clearance System Demo")
+            if submitted and matric_to_link:
+                link_data = {"tag_id": tag_id, "matric_no": matric_to_link}
+                result = client.link_tag(link_data)
+                if result:
+                    st.success(f"Successfully linked tag {tag_id} to {matric_to_link}.")
+                    del st.session_state.scanned_tag_id
+                    st.rerun()
+        
+    st.subheader("Unlink a Tag")
+    with st.form("unlink_tag_form"):
+        tag_to_unlink = st.text_input("Enter Tag ID to unlink")
+        submitted = st.form_submit_button("Unlink Tag")
+        if submitted and tag_to_unlink:
+            result = client.unlink_tag(tag_to_unlink)
+            if result:
+                st.success(f"Successfully unlinked tag {tag_to_unlink}.")
 
-# Display login status
-if st.session_state.access_token and st.session_state.user_info:
-    user = st.session_state.user_info
-    role_display = user.get('role')
-    if isinstance(role_display, dict):
-        role_display = role_display.get('value', 'N/A')
-    st.sidebar.success(f"Logged in: **{user.get('username')}**")
-    st.sidebar.caption(f"Role: {role_display}")
-else:
-    st.sidebar.info("Not logged in.")
-st.sidebar.markdown("---")
+def display_super_admin_dashboard():
+    st.header("Super Admin Panel")
 
-# Navigation
-page_options = {
-    "🔑 Login (Staff/Admin)": login_page,
-    "👑 Admin Panel": admin_management_page,
-    "👨‍🏫 Staff Actions": staff_actions_page,
-    "👨‍🎓 Student Actions": student_actions_page,
-    "📟 Device Simulation": device_simulation_page,
-}
-selected_page_title = st.sidebar.radio("Navigation", list(page_options.keys()))
-st.sidebar.markdown("---")
-st.sidebar.info("This is a demonstration frontend for the Clearance System API.")
+    with st.expander("Manage Users (Admins & Staff)", expanded=False):
+        # User management UI here
+        st.info("User management section to be built.")
 
-# Render the selected page
-page_options[selected_page_title]()
+    with st.expander("Manage RFID Devices", expanded=True):
+        st.subheader("Register New Device")
+        with st.form("create_device_form"):
+            device_name = st.text_input("Device Name (e.g., 'Library Entrance Scanner')")
+            location = st.text_input("Location (e.g., 'Main Library, Ground Floor')")
+            submitted = st.form_submit_button("Register Device")
+            if submitted and device_name and location:
+                device_data = {"device_name": device_name, "location": location}
+                result = client.create_device(device_data)
+                if result:
+                    st.success(f"Device '{device_name}' registered successfully!")
+                    st.rerun()
+
+        st.subheader("Registered Devices")
+        devices = client.get_all_devices()
+        if devices:
+            df_devices = pd.DataFrame(devices)
+            st.dataframe(df_devices, use_container_width=True)
+        else:
+            st.info("No devices have been registered yet.")
+            
+def main():
+    # This logic block now correctly handles the session state initialization
+    if "token" not in st.session_state or not st.session_state.token:
+        show_login_page()
+        return
+
+    # If we have a token but no user object, try to fetch it
+    if "user" not in st.session_state or not st.session_state.user:
+        user_details = client.get_current_user()
+        if user_details:
+            st.session_state.user = user_details
+        else:
+            # If fetching fails (e.g., token expired), clear session and re-login
+            st.session_state.clear()
+            show_login_page()
+            return
+            
+    # From here, we can safely assume st.session_state.user exists
+    user = st.session_state.user
+    st.sidebar.title("Dashboard")
+    st.sidebar.write(f"Welcome, **{user['full_name']}**")
+    st.sidebar.write(f"Role: **{user['role']}**")
+
+    # Define pages accessible by all logged-in users (Staff + Admin)
+    pages = ["Student Management", "RFID Management"]
+    # Only add Super Admin page if user has the correct role
+    if user['role'] == 'admin':
+        pages.append("Super Admin")
+
+    page = st.sidebar.radio("Navigate", pages)
+    
+    if st.sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+        
+    # --- Page Routing ---
+    if page == "Student Management":
+        display_student_dashboard()
+    elif page == "RFID Management":
+        display_rfid_dashboard()
+    elif page == "Super Admin":
+        # Second check to be absolutely sure
+        if user['role'] == 'admin':
+            display_super_admin_dashboard()
+        else:
+            st.error("You are not authorized to view this page.")
+
+if __name__ == "__main__":
+    main()
