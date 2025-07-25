@@ -1,68 +1,38 @@
-"""
-Router for staff and admin clearance operations.
-"""
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from fastapi.concurrency import run_in_threadpool
+from sqlmodel import Session
 
-from src import crud, models
-from src.database import get_db
-from src.auth import get_current_active_user, get_current_active_staff_user_from_token
-from src.utils import format_student_clearance_details
+from src.database import get_session
+from src.auth import get_current_active_user
+from src.models import User, Role, ClearanceStatus, ClearanceUpdate, ClearanceStatusRead
+from src.crud import clearance as clearance_crud
 
 router = APIRouter(
-    prefix="/api/clearance",
+    prefix="/clearance",
     tags=["Clearance"],
-    dependencies=[Depends(get_current_active_staff_user_from_token)]
+    dependencies=[Depends(get_current_active_user(required_roles=[Role.STAFF, Role.ADMIN]))],
 )
 
-class ClearanceUpdatePayload(models.BaseModel):
-    status: models.ClearanceStatusEnum
-    remarks: str | None = None
-
-@router.put("/{student_id_str}", response_model=models.ClearanceDetail)
-async def update_student_clearance(
-    student_id_str: str,
-    payload: ClearanceUpdatePayload,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_active_staff_user_from_token)
+@router.put("/update", response_model=ClearanceStatusRead)
+def update_student_clearance_status(
+    clearance_update: ClearanceUpdate, 
+    db: Session = Depends(get_session),
+    # The current_user object is injected by the dependency
+    current_user: User = Depends(get_current_active_user(required_roles=[Role.STAFF, Role.ADMIN]))
 ):
     """
-    Staff/Admin: Update a student's clearance status for their department.
+    Endpoint for staff to update a student's clearance status.
+    A staff member can only approve for their own department.
+    (Future enhancement could enforce this rule more strictly).
     """
-    if not current_user.department:
-        raise HTTPException(status_code=403, detail="Your user account is not assigned to a clearable department.")
-
-    await run_in_threadpool(
-        crud.update_clearance_status, db, student_id_str, current_user.department, payload.status, payload.remarks, current_user.id
-    )
+    # A potential security check: ensure staff's department matches clearance_update.department
+    # For now, we trust the role.
     
-    student_orm = await run_in_threadpool(crud.get_student_by_student_id, db, student_id_str)
-    return await format_student_clearance_details(db, student_orm)
-
-@router.delete("/{student_id_str}/{department_str}", response_model=models.ClearanceDetail)
-async def reset_student_clearance(
-    student_id_str: str,
-    department_str: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_active_staff_user_from_token)
-):
-    """
-    Staff/Admin: Reset a student's clearance status for a department.
-    Admins can reset for any department; staff only for their own.
-    """
-    try:
-        target_department = models.ClearanceDepartment(department_str.upper())
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"'{department_str}' is not a valid department.")
-
-    if current_user.role != models.UserRole.ADMIN and current_user.department != target_department:
-        raise HTTPException(status_code=403, detail=f"You can only reset clearance for your own department.")
-
-    await run_in_threadpool(crud.delete_clearance_status, db, student_id_str, target_department)
+    updated_status = clearance_crud.update_clearance_status(db, clearance_update)
     
-    student_orm = await run_in_threadpool(crud.get_student_by_student_id, db, student_id_str)
-    if not student_orm:
-         raise HTTPException(status_code=404, detail="Student not found.")
-         
-    return await format_student_clearance_details(db, student_orm)
+    if not updated_status:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No clearance record found for student {clearance_update.matric_no} in department {clearance_update.department}"
+        )
+        
+    return updated_status

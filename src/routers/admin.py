@@ -1,83 +1,225 @@
-"""
-Admin-only endpoints for managing system-wide operations like tag linking
-and deleting core resources like users and devices.
-"""
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlmodel import Session
+from typing import List, Optional, Dict
 
-from src import crud, models
-from src.auth import get_current_active_admin_user_from_token, get_current_active_user
-from src.database import get_db
+from src.database import get_session
+from src.auth import get_current_active_user
+from src.models import (
+    User, UserCreate, UserRead, UserUpdate, Role,
+    Student, StudentCreate, StudentRead, StudentUpdate, StudentReadWithClearance,
+    TagLink, RFIDTagRead, TagScan,
+    Device, DeviceCreate, DeviceRead
+)
+from src.crud import users as user_crud
+from src.crud import students as student_crud
+from src.crud import tag_linking as tag_crud
+from src.crud import devices as device_crud
 
+# In-memory storage for last scanned tags by an admin.
+# Key: admin user ID, Value: last scanned tag ID.
+# This is simple and effective for a non-distributed system.
+admin_scanned_tags: Dict[int, str] = {}
+
+# Define the router.
+# It's accessible to both Admins and Staff, providing a unified management panel.
 router = APIRouter(
-    prefix="/api/admin",
-    tags=["Admin"],
-    dependencies=[Depends(get_current_active_admin_user_from_token)]
+    prefix="/admin",
+    tags=["Administration"],
+    dependencies=[Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))],
 )
 
-@router.post("/prepare-tag-link", status_code=status.HTTP_202_ACCEPTED, response_model=dict)
-async def prepare_device_for_tag_linking(
-    request: models.PrepareTagLinkRequest,
-    current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+# --- Admin Tag Scanning for Web UI ---
+
+@router.post("/tags/scan", status_code=status.HTTP_204_NO_CONTENT)
+def report_scanned_tag(
+    scan_data: TagScan,
+    current_user: User = Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))
 ):
     """
-    Admin: Initiates a request to link a tag. This creates a temporary,
-    expiring 'PendingTagLink' record for a device.
+    (Admin & Staff) Endpoint for the admin's desk RFID reader to report a scanned tag.
+    The backend stores this tag ID temporarily against the admin's user ID.
     """
-    device = await run_in_threadpool(crud.get_device_by_id_str, db, request.device_identifier)
-    if not device or not device.is_active:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found or is inactive.")
+    admin_scanned_tags[current_user.id] = scan_data.tag_id
+    return
+
+@router.get("/tags/scan", response_model=TagScan)
+def retrieve_scanned_tag(
+    current_user: User = Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))
+):
+    """
+    (Admin & Staff) Endpoint for the admin's web portal to retrieve the last scanned tag.
+    The tag is removed after being retrieved to prevent re-use.
+    """
+    tag_id = admin_scanned_tags.pop(current_user.id, None)
+    if not tag_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No tag has been scanned recently.")
+    return TagScan(tag_id=tag_id)
+
+
+# --- Student Management (Admin + Staff) ---
+
+@router.post("/students/", response_model=StudentReadWithClearance, status_code=status.HTTP_201_CREATED)
+def create_student(student: StudentCreate, db: Session = Depends(get_session)):
+    """(Admin & Staff) Creates a new student and initializes their clearance status."""
+    db_student = student_crud.get_student_by_matric_no(db, matric_no=student.matric_no)
+    if db_student:
+        raise HTTPException(status_code=400, detail="Matriculation number already registered")
+    return student_crud.create_student(db=db, student=student)
+
+@router.get("/students/", response_model=List[StudentReadWithClearance])
+def read_all_students(skip: int = 0, limit: int = 100, db: Session = Depends(get_session)):
+    """(Admin & Staff) Retrieves a list of all student records."""
+    return student_crud.get_all_students(db, skip=skip, limit=limit)
+
+@router.get("/students/lookup", response_model=StudentReadWithClearance)
+def lookup_student(
+    matric_no: Optional[str] = Query(None, description="Matriculation number of the student."),
+    tag_id: Optional[str] = Query(None, description="RFID tag ID linked to the student."),
+    db: Session = Depends(get_session)
+):
+    """(Admin & Staff) Looks up a single student by Matric Number OR Tag ID."""
+    if not matric_no and not tag_id:
+        raise HTTPException(status_code=400, detail="A matric_no or tag_id must be provided.")
+    if matric_no and tag_id:
+        raise HTTPException(status_code=400, detail="Provide either matric_no or tag_id, not both.")
+
+    db_student = None
+    if matric_no:
+        db_student = student_crud.get_student_by_matric_no(db, matric_no=matric_no)
+    elif tag_id:
+        db_student = student_crud.get_student_by_tag_id(db, tag_id=tag_id)
     
-    if request.target_user_type == models.TargetUserType.STUDENT:
-        target = await run_in_threadpool(crud.get_student_by_student_id, db, request.target_identifier)
-    else:
-        target = await run_in_threadpool(crud.get_user_by_username, db, request.target_identifier)
-    
-    if not target:
+    if not db_student:
+        raise HTTPException(status_code=404, detail="Student not found with the provided identifier.")
+    return db_student
+
+
+@router.get("/students/{student_id}", response_model=StudentReadWithClearance)
+def read_single_student(student_id: int, db: Session = Depends(get_session)):
+    """(Admin & Staff) Retrieves a single student's complete record by their internal ID."""
+    db_student = student_crud.get_student_by_id(db, student_id=student_id)
+    if not db_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return db_student
+
+@router.put("/students/{student_id}", response_model=StudentReadWithClearance)
+def update_student_details(student_id: int, student: StudentUpdate, db: Session = Depends(get_session)):
+    """(Admin & Staff) Updates a student's information."""
+    updated_student = student_crud.update_student(db, student_id=student_id, student_update=student)
+    if not updated_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return updated_student
+
+# --- Tag Management (Admin + Staff) ---
+
+@router.post("/tags/link", response_model=RFIDTagRead)
+def link_rfid_tag(link_data: TagLink, db: Session = Depends(get_session)):
+    """(Admin & Staff) Links an RFID tag to a student or user."""
+    new_tag = tag_crud.link_tag(db, link_data)
+    if not new_tag:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"{request.target_user_type.value} '{request.target_identifier}' not found."
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not link tag. The tag may already be in use, or the user/student already has a tag."
+        )
+    return new_tag
+
+@router.delete("/tags/{tag_id}/unlink", response_model=RFIDTagRead)
+def unlink_rfid_tag(tag_id: str, db: Session = Depends(get_session)):
+    """(Admin & Staff) Unlinks an RFID tag, making it available again."""
+    deleted_tag = tag_crud.unlink_tag(db, tag_id)
+    if not deleted_tag:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RFID Tag not found.")
+    return deleted_tag
+
+
+# --- Super Admin Only Functions ---
+
+def require_super_admin(current_user: User = Depends(get_current_active_user())):
+    """Dependency to ensure a user has the ADMIN role."""
+    if current_user.role != Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action requires Super Admin privileges."
         )
 
-    expiry_time = datetime.utcnow() + timedelta(minutes=2)
-    await run_in_threadpool(
-        crud.create_pending_tag_link, db, request, current_user.id, expiry_time
-    )
-    return {
-        "message": "Device is ready to link tag.",
-        "device_id": device.device_id,
-        "target": request.target_identifier,
-        "expires_at": expiry_time.isoformat()
-    }
+@router.post("/users/", response_model=UserRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_super_admin)])
+def create_user(user: UserCreate, db: Session = Depends(get_session)):
+    """(Super Admin Only) Creates a new user (Staff or Admin)."""
+    db_user = user_crud.get_user_by_username(db, username=user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    return user_crud.create_user(db=db, user=user)
 
-@router.delete("/users/{username}", status_code=status.HTTP_200_OK, response_model=dict)
-async def delete_user_endpoint(
-    username: str,
-    db: Session = Depends(get_db),
-    current_admin: models.User = Depends(get_current_active_admin_user_from_token)
-):
-    """
-    Admin: Permanently deletes a user (staff or other admin).
-    """
-    try:
-        deleted_user = await run_in_threadpool(crud.delete_user, db, username, current_admin)
-        return {"message": "User deleted successfully", "username": deleted_user.username}
-    except HTTPException as e:
-        raise e
+@router.get("/users/", response_model=List[UserRead], dependencies=[Depends(require_super_admin)])
+def read_all_users(db: Session = Depends(get_session)):
+    """(Super Admin Only) Retrieves a list of all users."""
+    return user_crud.get_all_users(db)
 
-@router.delete("/devices/{device_id_str}", status_code=status.HTTP_200_OK, response_model=dict)
-async def delete_device_endpoint(
-    device_id_str: str,
-    db: Session = Depends(get_db)
+@router.get("/users/lookup", response_model=UserRead, dependencies=[Depends(require_super_admin)])
+def lookup_user(
+    username: Optional[str] = Query(None, description="Username of the user."),
+    tag_id: Optional[str] = Query(None, description="RFID tag ID linked to the user."),
+    db: Session = Depends(get_session)
 ):
-    """
-    Admin: Permanently deletes a registered RFID device and all its logs.
-    """
-    try:
-        deleted_device = await run_in_threadpool(crud.delete_device, db, device_id_str)
-        return {"message": "Device deleted successfully", "device_id": deleted_device.device_id}
-    except HTTPException as e:
-        raise e
+    """(Super Admin Only) Looks up a single user by Username OR Tag ID."""
+    if not username and not tag_id:
+        raise HTTPException(status_code=400, detail="A username or tag_id must be provided.")
+    if username and tag_id:
+        raise HTTPException(status_code=400, detail="Provide either username or tag_id, not both.")
+
+    db_user = None
+    if username:
+        db_user = user_crud.get_user_by_username(db, username=username)
+    elif tag_id:
+        db_user = user_crud.get_user_by_tag_id(db, tag_id=tag_id)
+    
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found with the provided identifier.")
+    return db_user
+
+@router.put("/users/{user_id}", response_model=UserRead, dependencies=[Depends(require_super_admin)])
+def update_user_details(user_id: int, user: UserUpdate, db: Session = Depends(get_session)):
+    """(Super Admin Only) Updates a user's details (e.g., role)."""
+    updated_user = user_crud.update_user(db, user_id=user_id, user_update=user)
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated_user
+
+@router.delete("/users/{user_id}", response_model=UserRead, dependencies=[Depends(require_super_admin)])
+def delete_user_account(user_id: int, db: Session = Depends(get_session), current_user: User = Depends(get_current_active_user())):
+    """(Super Admin Only) Deletes a user account."""
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account.")
+    deleted_user = user_crud.delete_user(db, user_id=user_id)
+    if not deleted_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return deleted_user
+
+@router.delete("/students/{student_id}", response_model=StudentRead, dependencies=[Depends(require_super_admin)])
+def delete_student_record(student_id: int, db: Session = Depends(get_session)):
+    """(Super Admin Only) Deletes a student record and all associated data."""
+    deleted_student = student_crud.delete_student(db, student_id=student_id)
+    if not deleted_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return deleted_student
+
+@router.post("/devices/", response_model=DeviceRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_super_admin)])
+def create_device(device: DeviceCreate, db: Session = Depends(get_session)):
+    """(Super Admin Only) Registers a new RFID hardware device."""
+    db_device = device_crud.get_device_by_location(db, location=device.location)
+    if db_device:
+        raise HTTPException(status_code=400, detail=f"A device at location '{device.location}' already exists.")
+    return device_crud.create_device(db=db, device=device)
+
+@router.get("/devices/", response_model=List[DeviceRead], dependencies=[Depends(require_super_admin)])
+def read_all_devices(db: Session = Depends(get_session)):
+    """(Super Admin Only) Retrieves a list of all registered devices."""
+    return device_crud.get_all_devices(db)
+
+@router.delete("/devices/{device_id}", response_model=DeviceRead, dependencies=[Depends(require_super_admin)])
+def delete_device_registration(device_id: int, db: Session = Depends(get_session)):
+    """(Super Admin Only) De-authorizes a hardware device."""
+    deleted_device = device_crud.delete_device(db, device_id=device_id)
+    if not deleted_device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return deleted_device

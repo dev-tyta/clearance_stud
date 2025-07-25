@@ -1,102 +1,58 @@
-"""
-CRUD operations for student Clearance Statuses.
-"""
-from sqlalchemy.orm import Session
-from fastapi import HTTPException, status
+from sqlmodel import Session, select
+from typing import List, Optional
 
-from src import models
+from src.models import Student, ClearanceStatus, ClearanceUpdate, Department, ClearanceProcess
 
-def get_clearance_statuses_by_student_id(db: Session, student_id: str) -> list[models.ClearanceStatus]:
+def get_clearance_status_for_student(db: Session, student: Student) -> List[ClearanceStatus]:
     """
-    Fetches all existing clearance status records for a given student.
+    Retrieves all clearance statuses for a given student object.
     """
-    return db.query(models.ClearanceStatus).filter(models.ClearanceStatus.student_id == student_id).all()
+    return student.clearance_statuses
 
-def update_clearance_status(
-    db: Session,
-    student_id: str,
-    department: models.ClearanceDepartment,
-    new_status: models.ClearanceStatusEnum,
-    remarks: str,
-    cleared_by_user_id: int
-) -> models.ClearanceStatus:
+def update_clearance_status(db: Session, clearance_update: ClearanceUpdate) -> Optional[ClearanceStatus]:
     """
-    Updates or creates a clearance status for a student in a specific department.
+    Updates the clearance status for a student in a specific department.
+
+    This function performs a direct lookup on the ClearanceStatus table, which is
+    more efficient than fetching the student and iterating through their statuses.
     """
-    student = db.query(models.Student).filter(models.Student.student_id == student_id).first()
+    # First, find the student to ensure they exist.
+    student = db.exec(select(Student).where(Student.matric_no == clearance_update.matric_no)).first()
     if not student:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Student with ID '{student_id}' not found."
-        )
+        return None # Student not found
 
-    existing_status = db.query(models.ClearanceStatus).filter(
-        models.ClearanceStatus.student_id == student_id,
-        models.ClearanceStatus.department == department
-    ).first()
+    # Directly query for the specific clearance status record.
+    statement = select(ClearanceStatus).where(
+        ClearanceStatus.student_id == student.id,
+        ClearanceStatus.department == clearance_update.department
+    )
+    status_to_update = db.exec(statement).first()
 
-    if existing_status:
-        existing_status.status = new_status
-        existing_status.remarks = remarks
-        existing_status.cleared_by = cleared_by_user_id
-        db_status = existing_status
-    else:
-        db_status = models.ClearanceStatus(
-            student_id=student_id,
-            department=department,
-            status=new_status,
-            remarks=remarks,
-            cleared_by=cleared_by_user_id
-        )
-        db.add(db_status)
+    if not status_to_update:
+        # This case should theoretically not happen if students are created correctly,
+        # but it's a good safeguard.
+        return None 
 
+    # Update the status and commit the change.
+    status_to_update.status = clearance_update.status
+    db.add(status_to_update)
     db.commit()
-    db.refresh(db_status)
-    return db_status
-
-def delete_clearance_status(
-    db: Session,
-    student_id: str,
-    department: models.ClearanceDepartment
-) -> models.ClearanceStatus | None:
-    """
-    Deletes a specific clearance status record for a student.
-
-    This effectively resets the status for that department to the default state.
-    Returns the deleted object if found, otherwise returns None.
-    """
-    status_to_delete = db.query(models.ClearanceStatus).filter(
-        models.ClearanceStatus.student_id == student_id,
-        models.ClearanceStatus.department == department
-    ).first()
-
-    if status_to_delete:
-        db.delete(status_to_delete)
-        db.commit()
-
-    return status_to_delete
-
-
-def get_all_clearance_status(db: Session) -> list[models.ClearanceStatus]:
-    """
-    Retrieves all clearance statuses from the database.
+    db.refresh(status_to_update)
     
-    This function is useful for administrative purposes, allowing staff to view
-    all clearance records across all students and departments.
-    """
-    return db.query(models.ClearanceStatus).all()
+    return status_to_update
 
-def get_student_clearance_status(
-    db: Session,
-    student_id: str,
-    department: models.ClearanceDepartment
-) -> models.ClearanceStatus | None:
+def is_student_fully_cleared(db: Session, matric_no: str) -> bool:
     """
-    Retrieves the clearance status for a specific student in a specific department.
-    
-    Returns None if no status exists for that student and department.
+    Checks if a student has been approved by all required departments.
     """
-    return db.query(models.ClearanceStatus).filter(
-        models.ClearanceStatus.student_id == student_id,
-        models.ClearanceStatus.department == department
-    ).first()
+    student = db.exec(select(Student).where(Student.matric_no == matric_no)).first()
+    if not student:
+        return False # Or raise an error, depending on desired behavior
+
+    # Check if any of the student's clearance statuses are NOT 'approved'.
+    for status in student.clearance_statuses:
+        if status.status != ClearanceProcess.APPROVED:
+            return False
+            
+    # If the loop completes without returning, all statuses are approved.
+    return True

@@ -1,64 +1,29 @@
-"""
-Router for all CRUD operations related to students.
-"""
-from fastapi import APIRouter, HTTPException, status, Depends
-from fastapi.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session as SQLAlchemySessionType
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlmodel import Session
 
-from src import crud, models
-from src.auth import get_current_active_admin_user_from_token
-from src.database import get_db
-from src.utils import format_student_clearance_details
+from src.database import get_session
+from src.auth import get_current_active_student
+from src.models import Student, StudentReadWithClearance
 
 router = APIRouter(
-    prefix="/api/students",
-    tags=["students"],
-    )
+    prefix="/students",
+    tags=["Students"],
+)
 
-@router.post("/", response_model=models.StudentResponse, status_code=status.HTTP_201_CREATED)
-async def create_student_endpoint(
-    student_data: models.StudentCreate,
-    db: SQLAlchemySessionType = Depends(get_db),
-):
-    """Admin: Create a new student."""
-    try:
-        created_student_orm = await run_in_threadpool(crud.create_student, db, student_data)
-        return created_student_orm
-    except HTTPException as e:
-        raise e
-
-@router.get("/", response_model=List[models.StudentResponse])
-async def get_students_endpoint(
-    skip: int = 0,
-    limit: int = 100,
-    db: SQLAlchemySessionType = Depends(get_db),
-):
-    """Admin: Get a list of all students."""
-    students_orm_list = await run_in_threadpool(crud.get_all_students, db, skip, limit)
-    return students_orm_list
-
-@router.get("/{student_id_str}", response_model=models.ClearanceDetail)
-async def get_student_clearance_endpoint(
-    student_id_str: str,
-    db: SQLAlchemySessionType = Depends(get_db),
-):
-    """Admin: Get detailed clearance status for a specific student."""
-    student_orm = await run_in_threadpool(crud.get_student_by_student_id, db, student_id_str)
-    if not student_orm:
-        raise HTTPException(status_code=404, detail="Student not found")
-    return await format_student_clearance_details(db, student_orm)
-
-@router.delete("/{student_id_str}", status_code=status.HTTP_200_OK, response_model=dict)
-async def delete_student_endpoint(
-    student_id_str: str,
-    db: SQLAlchemySessionType = Depends(get_db),
+@router.get("/me", response_model=StudentReadWithClearance)
+def read_student_me(
+    # This dependency ensures the user is an authenticated student
+    # and injects their database object into the 'current_student' parameter.
+    current_student: Student = Depends(get_current_active_student)
 ):
     """
-    Admin: Permanently deletes a student and all associated records.
+    Endpoint for a logged-in student to retrieve their own profile
+    and clearance information. The user is identified via their JWT token.
     """
-    try:
-        deleted_student = await run_in_threadpool(crud.delete_student, db, student_id_str)
-        return {"message": "Student deleted successfully", "student_id": deleted_student.student_id}
-    except HTTPException as e:
-        raise e
+    # Because the dependency returns the full student object, we can just return it.
+    # No need for another database call.
+    if not current_student:
+         # This should not happen if the dependency is set up correctly
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    return current_student
+

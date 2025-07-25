@@ -1,52 +1,74 @@
-"""
-CRUD operations for Devices and Device Logs.
-"""
-from sqlalchemy.orm import Session
-from datetime import datetime
-from fastapi import HTTPException, status
+from sqlmodel import Session, select
+import secrets
+from typing import List, Optional
 
-from src import models
+from src.models import Device, DeviceCreate, Department
 
-def get_device_by_id_str(db: Session, device_id: str) -> models.Device | None:
-    """Fetches a device by its public device_id string."""
-    return db.query(models.Device).filter(models.Device.device_id == device_id).first()
-
-def get_device_by_api_key(db: Session, api_key: str) -> models.Device | None:
-    """Fetches a device by its unique API key for authentication."""
-    return db.query(models.Device).filter(models.Device.api_key == api_key).first()
-
-def update_device_last_seen(db: Session, device_id: int):
-    """Updates the last_seen timestamp for a device."""
-    db.query(models.Device).filter(models.Device.id == device_id).update({"last_seen": datetime.utcnow()})
-    db.commit()
-
-def create_device_log(db: Session, log_data: dict):
-    """Creates a new log entry for a device action."""
-    new_log = models.DeviceLog(**log_data)
-    db.add(new_log)
-    db.commit()
-    db.refresh(new_log)
-    return new_log
-
-def delete_device(db: Session, device_id_str: str) -> models.Device:
+def create_device(db: Session, device: DeviceCreate) -> Optional[Device]:
     """
-    Deletes a device and all of its associated records (logs, pending links).
+    Creates a new device for a department.
+    Generates a unique API key for authentication.
+    Returns None if a device with the same name already exists.
     """
-    device_to_delete = get_device_by_id_str(db, device_id_str)
-    if not device_to_delete:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Device with ID '{device_id_str}' not found."
-        )
+    # Check for existing device with the same name to prevent duplicates
+    existing_device = db.exec(select(Device).where(Device.device_name == device.device_name)).first()
+    if existing_device:
+        return None
+
+    # Generate a secure, URL-safe API key
+    api_key = secrets.token_urlsafe(32)
     
-    device_pk_id = device_to_delete.id
-
-    # Delete all dependent records first to maintain foreign key integrity
-    db.query(models.DeviceLog).filter(models.DeviceLog.device_fk_id == device_pk_id).delete(synchronize_session=False)
-    db.query(models.PendingTagLink).filter(models.PendingTagLink.device_id_fk == device_pk_id).delete(synchronize_session=False)
-
-    # Now delete the device itself
-    db.delete(device_to_delete)
+    db_device = Device(
+        device_name=device.device_name,
+        department=device.department,
+        api_key=api_key,
+        is_active=True
+    )
+    
+    db.add(db_device)
     db.commit()
+    db.refresh(db_device)
+    return db_device
 
-    return device_to_delete
+def get_device_by_api_key(db: Session, api_key: str) -> Optional[Device]:
+    """Retrieves an active device by its API key."""
+    statement = select(Device).where(Device.api_key == api_key, Device.is_active == True)
+    return db.exec(statement).first()
+
+def get_device_by_name(db: Session, device_name: str) -> Optional[Device]:
+    """Retrieves a device by its unique name."""
+    return db.exec(select(Device).where(Device.device_name == device_name)).first()
+
+def get_all_devices(db: Session, skip: int = 0, limit: int = 100) -> List[Device]:
+    """Retrieves a list of all devices."""
+    return db.exec(select(Device).offset(skip).limit(limit)).all()
+
+def update_device(db: Session, device_id: int, device_update: dict) -> Optional[Device]:
+    """
+    Updates a device's mutable properties (e.g., name, active status).
+    The API key is immutable and cannot be changed here.
+    """
+    db_device = db.get(Device, device_id)
+    if not db_device:
+        return None
+    
+    # Exclude API key from updates for security
+    device_update.pop("api_key", None)
+
+    for key, value in device_update.items():
+        setattr(db_device, key, value)
+        
+    db.add(db_device)
+    db.commit()
+    db.refresh(db_device)
+    return db_device
+
+def delete_device(db: Session, device_id: int) -> Optional[Device]:
+    """Deletes a device from the database."""
+    db_device = db.get(Device, device_id)
+    if not db_device:
+        return None
+    
+    db.delete(db_device)
+    db.commit()
+    return db_device
