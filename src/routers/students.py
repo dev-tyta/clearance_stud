@@ -4,6 +4,7 @@ from sqlmodel import Session, SQLModel
 from src.auth import get_current_active_user
 from src.database import get_session
 from src.models import StudentReadWithClearance
+from src.crud import students as student_crud
 
 # This is the new request body model for the POST request.
 class StudentLookupRequest(SQLModel):
