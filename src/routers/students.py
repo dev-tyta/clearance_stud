@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session
 
 from src.database import get_session
-from src.auth import get_current_active_student
+from src.auth import get_current_active_user
 from src.models import Student, StudentReadWithClearance
 
 router = APIRouter(
@@ -14,7 +14,7 @@ router = APIRouter(
 def read_student_me(
     # This dependency ensures the user is an authenticated student
     # and injects their database object into the 'current_student' parameter.
-    current_student: Student = Depends(get_current_active_student)
+    current_student: Student = Depends(get_current_active_user)
 ):
     """
     Endpoint for a logged-in student to retrieve their own profile

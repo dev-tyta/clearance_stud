@@ -1,130 +1,142 @@
-from sqlmodel import Field, Relationship, SQLModel
 from typing import List, Optional
-from enum import Enum as PyEnum
+from sqlmodel import Field, Relationship, SQLModel, Session, select
+from enum import Enum
 
-# --- Enums for Controlled Vocabularies ---
-# Using enums ensures data consistency for categorical fields.
+# --- Enums for choices ---
 
-class UserRole(str, PyEnum):
-    STUDENT = "student"
-    STAFF = "staff"
+class Role(str, Enum):
     ADMIN = "admin"
+    STAFF = "staff"
+    STUDENT = "student"
 
-class Department(str, PyEnum):
-    LIBRARY = "library"
-    BURSARY = "bursary"
-    ALUMNI = "alumni"
-    DEPARTMENTAL = "departmental"
+class Department(str, Enum):
+    COMPUTER_SCIENCE = "Computer Science"
+    ENGINEERING = "Engineering"
+    BUSINESS_ADMIN = "Business Administration"
+    LAW = "Law"
+    MEDICINE = "Medicine"
 
-class ClearanceProcess(str, PyEnum):
+class ClearanceDepartment(str, Enum):
+    LIBRARY = "Library"
+    STUDENT_AFFAIRS = "Student Affairs"
+    BURSARY = "Bursary"
+    ACADEMIC_AFFAIRS = "Academic Affairs"
+    HEALTH_CENTER = "Health Center"
+
+class Status(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
 
 # --- Database Table Models ---
 
-# Represents a User (Staff or Admin)
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)
-    email: str = Field(unique=True)
-    full_name: Optional[str] = None
     hashed_password: str
-    role: UserRole = Field(default=UserRole.STAFF)
-    is_active: bool = Field(default=True)
+    role: Role
+    rfid_tag: Optional["RFIDTag"] = Relationship(back_populates="user", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
-    # One-to-one relationship with an RFID tag
-    rfid_tag: Optional["RFIDTag"] = Relationship(back_populates="user")
-
-# Represents a Student
 class Student(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    matric_no: str = Field(index=True, unique=True)
     full_name: str
-    email: str = Field(unique=True)
+    matric_no: str = Field(index=True, unique=True)
     department: Department
-    hashed_password: str
+    rfid_tag: Optional["RFIDTag"] = Relationship(back_populates="student", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    clearance_statuses: List["ClearanceStatus"] = Relationship(back_populates="student", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
-    # One-to-many relationship with clearance statuses
-    clearance_statuses: List["ClearanceStatus"] = Relationship(
-        back_populates="student", sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
-    # One-to-one relationship with an RFID tag
-    rfid_tag: Optional["RFIDTag"] = Relationship(back_populates="student")
-
-# Represents an RFID tag, linking it to either a User or a Student
-class RFIDTag(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    tag_id: str = Field(index=True, unique=True, description="The unique ID from the RFID chip")
-    
-    # Foreign keys to link to User or Student (only one should be set)
-    user_id: Optional[int] = Field(default=None, foreign_key="user.id")
-    student_id: Optional[int] = Field(default=None, foreign_key="student.id")
-
-    # Relationships back to the owner of the tag
-    user: Optional[User] = Relationship(back_populates="rfid_tag")
-    student: Optional[Student] = Relationship(back_populates="rfid_tag")
-
-# Represents a single clearance status for a student in a specific department
 class ClearanceStatus(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    department: Department
-    status: ClearanceProcess = Field(default=ClearanceProcess.PENDING)
-    
+    department: ClearanceDepartment
+    status: Status = Status.PENDING
     student_id: int = Field(foreign_key="student.id")
     student: Student = Relationship(back_populates="clearance_statuses")
 
-# Represents a physical ESP32 device
+class RFIDTag(SQLModel, table=True):
+    tag_id: str = Field(primary_key=True, index=True)
+    student_id: Optional[int] = Field(default=None, foreign_key="student.id")
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    student: Optional[Student] = Relationship(back_populates="rfid_tag")
+    user: Optional[User] = Relationship(back_populates="rfid_tag")
+
 class Device(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    device_name: str = Field(index=True, unique=True)
-    api_key: str = Field(unique=True)
-    is_active: bool = Field(default=True)
-    department: Department
+    api_key: str = Field(unique=True, index=True)
+    location: str
 
 # --- Pydantic Models for API Operations ---
-# These models define the shape of data for creating and updating records via the API.
 
-# For Users
+# User Models
 class UserCreate(SQLModel):
     username: str
-    email: str
     password: str
-    full_name: Optional[str] = None
-    role: UserRole = UserRole.STAFF
+    role: Role
 
-class UserUpdate(SQLModel):
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    password: Optional[str] = None
-    is_active: Optional[bool] = None
+class UserRead(SQLModel):
+    id: int
+    username: str
+    role: Role
 
-# For Students
+# Student Models
 class StudentCreate(SQLModel):
-    matric_no: str
     full_name: str
-    email: str
+    matric_no: str
+    department: Department
+    username: str # For creating the associated user account
     password: str
 
 class StudentUpdate(SQLModel):
     full_name: Optional[str] = None
-    email: Optional[str] = None
-    password: Optional[str] = None
+    department: Optional[Department] = None
 
-# For Devices
-class DeviceCreate(SQLModel):
-    device_name: str
+class StudentRead(SQLModel):
+    id: int
+    full_name: str
+    matric_no: str
     department: Department
 
-# For Tag Linking
+# Clearance Status Models
+class ClearanceStatusRead(SQLModel):
+    department: ClearanceDepartment
+    status: Status
+
+class ClearanceStatusUpdate(SQLModel):
+    status: Status
+    matric_no: str
+
+# Combined Read Model
+class StudentReadWithClearance(StudentRead):
+    clearance_statuses: List[ClearanceStatusRead] = []
+    rfid_tag: Optional["RFIDTagRead"] = None
+
+
+# RFID Tag Models
+class RFIDTagRead(SQLModel):
+    tag_id: str
+    student_id: Optional[int] = None
+    user_id: Optional[int] = None
+
 class TagLink(SQLModel):
     tag_id: str
     matric_no: Optional[str] = None
     username: Optional[str] = None
 
-# For Clearance Updates
-class ClearanceUpdate(SQLModel):
-    matric_no: str
-    department: Department
-    status: ClearanceProcess
+# RFID Device-Specific Models
+class RFIDScanRequest(SQLModel):
+    tag_id: str
 
+class RFIDStatusResponse(SQLModel):
+    status: str # e.g., "found", "unregistered", "error"
+    full_name: Optional[str] = None
+    message: Optional[str] = None
+    clearance: Optional[str] = None # e.g., "Approved", "Pending", "Rejected"
+
+
+# Device Models
+class DeviceCreate(SQLModel):
+    location: str
+
+class DeviceRead(SQLModel):
+    id: int
+    api_key: str
+    location: str
