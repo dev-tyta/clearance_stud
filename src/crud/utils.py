@@ -1,14 +1,11 @@
 """
 Utility functions for CRUD operations.
 """
-import bcrypt
+from src.config import settings
+
+# --- Password Hashing ---
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return settings.PWD_CONTEXT.verify(plain_password, hashed_password)
 
 def hash_password(password: str) -> str:
-    """Hashes a password using bcrypt."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def verify_password(plain_password: str, hashed_password_str: str) -> bool:
-    """Verifies a plain password against a hashed password."""
-    if not plain_password or not hashed_password_str:
-        return False
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password_str.encode('utf-8'))
+    return settings.PWD_CONTEXT.hash(password)

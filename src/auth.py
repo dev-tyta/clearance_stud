@@ -1,17 +1,16 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlmodel import Session, select
 from typing import List, Optional
-from typing import List, Optional
 from datetime import datetime, timedelta
-
 
 from src.config import settings
 from src.database import get_session
 from src.crud import users as user_crud
 from src.crud import devices as device_crud
 from src.models import User, Role, Device
+from src.crud.utils import verify_password, hash_password
 
 # --- Configuration ---
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -28,13 +27,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
-# --- Password Hashing ---
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return settings.PWD_CONTEXT.verify(plain_password, hashed_password)
-
-def hash_password(password: str) -> str:
-    return settings.PWD_CONTEXT.hash(password)
-
 # --- User Authentication ---
 def authenticate_user(db: Session, username: str, password: str):
     """Authenticate user by username and password."""
@@ -47,20 +39,20 @@ def authenticate_user(db: Session, username: str, password: str):
 
 # --- Dependency for API Key Authentication ---
 
-def get_api_key(
-    key: str = Depends(api_key_header), db: Session = Depends(get_session)
-) -> Device:
-    """
-    Dependency to validate the API key from the x-api-key header.
-    Ensures the device is registered in the database.
-    """
-    db_device = device_crud.get_device_by_api_key(db, api_key=key)
-    if not db_device:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API Key",
-        )
-    return db_device
+# def get_api_key(
+#     key: str = Depends(api_key_header), db: Session = Depends(get_session)
+# ) -> Device:
+#     """
+#     Dependency to validate the API key from the x-api-key header.
+#     Ensures the device is registered in the database.
+#     """
+#     db_device = device_crud.get_device_by_api_key(db, api_key=key)
+#     if not db_device:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid or missing API Key",
+#         )
+#     return db_device
 
 
 # --- Dependency for User Authentication and Authorization ---
@@ -98,3 +90,20 @@ def get_current_active_user(required_roles: List[Role] = None):
         return user
 
     return dependency
+
+async def get_api_key(api_key: str = Security(api_key_header), db: Session = Depends(get_session)):
+    """Validate device API key."""
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key required"
+        )
+    
+    device = device_crud.get_device_by_api_key(db, api_key=api_key)
+    if not device or not device.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API key"
+        )
+    
+    return api_key

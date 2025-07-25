@@ -2,7 +2,7 @@ from sqlmodel import Session, select
 from typing import List, Optional
 
 from src.models import User, UserCreate, UserUpdate, RFIDTag
-from src.auth import hash_password
+from src.crud.utils import hash_password
 
 # --- Read Operations ---
 
@@ -19,67 +19,58 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.exec(select(User).where(User.email == email)).first()
 
 def get_user_by_tag_id(db: Session, tag_id: str) -> Optional[User]:
-    """Retrieves a user by their linked RFID tag ID."""
-    statement = select(User).join(RFIDTag).where(RFIDTag.tag_id == tag_id)
-    return db.exec(statement).first()
+    """Get user by RFID tag ID."""
+    from src.models import RFIDTag
+    tag = db.exec(select(RFIDTag).where(RFIDTag.tag_id == tag_id)).first()
+    if tag and tag.user_id:
+        return db.exec(select(User).where(User.id == tag.user_id)).first()
+    return None
 
 def get_all_users(db: Session, skip: int = 0, limit: int = 100) -> List[User]:
     """Retrieves a paginated list of all users."""
     return db.exec(select(User).offset(skip).limit(limit)).all()
 
-# --- Write Operations ---
-
 def create_user(db: Session, user: UserCreate) -> User:
-    """
-    Creates a new user.
-    - Hashes the password before saving.
-    - The router should handle checks for existing username/email to provide clean HTTP errors.
-    """
-    hashed_pass = hash_password(user.password)
+    """Creates a new user and hashes their password."""
+    hashed_password = hash_password(user.password)
     db_user = User(
         username=user.username,
+        hashed_password=hashed_password,
         email=user.email,
         full_name=user.full_name,
-        hashed_password=hashed_pass,
-        role=user.role
+        role=user.role,
+        department=user.department
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     return db_user
 
-def update_user(db: Session, user_id: int, user_update: UserUpdate) -> Optional[User]:
-    """
-    Updates a user's information.
-    - If a new password is provided, it will be hashed.
-    """
-    db_user = db.get(User, user_id)
-    if not db_user:
+def update_user(db: Session, user: User, updates: UserUpdate) -> User:
+    """Updates a user's information."""
+    user = get_user_by_id(db, user_id=user.id)
+    if not user:
         return None
-
-    update_data = user_update.model_dump(exclude_unset=True)
     
-    # Hash password if it's being updated
+    update_data = updates.model_dump(exclude_unset=True)
+    
     if "password" in update_data:
+        # Hash the new password if it's being updated
         update_data["hashed_password"] = hash_password(update_data.pop("password"))
-
-    for key, value in update_data.items():
-        setattr(db_user, key, value)
     
-    db.add(db_user)
+    user.sqlmodel_update(update_data)
+    
+    db.add(user)
     db.commit()
-    db.refresh(db_user)
-    return db_user
+    db.refresh(user)
+    return user
 
-def delete_user(db: Session, user_id: int) -> Optional[User]:
-    """
-    Deletes a user from the database.
-    The linked RFID tag will also be deleted due to cascade settings.
-    """
-    db_user = db.get(User, user_id)
-    if not db_user:
+def delete_user(db: Session, user_id: int) -> User | None:
+    """Deletes a user by their ID."""
+    user_to_delete = db.get(User, user_id)
+    if not user_to_delete:
         return None
-    
-    db.delete(db_user)
+    db.delete(user_to_delete)
     db.commit()
-    return db_user
+    # The user object is no longer valid after deletion, so we return the in-memory object
+    return user_to_delete

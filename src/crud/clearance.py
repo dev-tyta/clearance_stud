@@ -1,7 +1,6 @@
 from sqlmodel import Session, select
 from typing import List, Optional
-
-from src.models import Student, ClearanceStatus, ClearanceUpdate, Department, ClearanceProcess
+from src.models import ClearanceStatus, Student, ClearanceUpdate, ClearanceStatusEnum
 
 def get_clearance_status_for_student(db: Session, student: Student) -> List[ClearanceStatus]:
     """
@@ -9,37 +8,38 @@ def get_clearance_status_for_student(db: Session, student: Student) -> List[Clea
     """
     return student.clearance_statuses
 
-def update_clearance_status(db: Session, clearance_update: ClearanceUpdate) -> Optional[ClearanceStatus]:
+def update_clearance_status(db: Session, update_data: ClearanceUpdate) -> ClearanceStatus | None:
     """
-    Updates the clearance status for a student in a specific department.
-
-    This function performs a direct lookup on the ClearanceStatus table, which is
-    more efficient than fetching the student and iterating through their statuses.
+    Updates the clearance status for a specific student and department.
     """
-    # First, find the student to ensure they exist.
-    student = db.exec(select(Student).where(Student.matric_no == clearance_update.matric_no)).first()
+    # Find the student first
+    student_statement = select(Student).where(Student.matric_no == update_data.matric_no)
+    student = db.exec(student_statement).first()
     if not student:
         return None # Student not found
 
-    # Directly query for the specific clearance status record.
-    statement = select(ClearanceStatus).where(
+    # Now find the specific clearance status record for that student
+    status_statement = select(ClearanceStatus).where(
         ClearanceStatus.student_id == student.id,
-        ClearanceStatus.department == clearance_update.department
+        ClearanceStatus.department == update_data.department
     )
-    status_to_update = db.exec(statement).first()
+    clearance_record = db.exec(status_statement).first()
 
-    if not status_to_update:
-        # This case should theoretically not happen if students are created correctly,
-        # but it's a good safeguard.
+    if not clearance_record:
+        # This case should ideally not happen if students are created correctly
         return None 
 
-    # Update the status and commit the change.
-    status_to_update.status = clearance_update.status
-    db.add(status_to_update)
-    db.commit()
-    db.refresh(status_to_update)
+    # Update the status and remarks
+    clearance_record.status = update_data.status
+    if update_data.remarks is not None:
+        clearance_record.remarks = update_data.remarks
     
-    return status_to_update
+    db.add(clearance_record)
+    db.commit()
+    db.refresh(clearance_record)
+
+    return clearance_record
+
 
 def is_student_fully_cleared(db: Session, matric_no: str) -> bool:
     """
@@ -51,7 +51,7 @@ def is_student_fully_cleared(db: Session, matric_no: str) -> bool:
 
     # Check if any of the student's clearance statuses are NOT 'approved'.
     for status in student.clearance_statuses:
-        if status.status != ClearanceProcess.APPROVED:
+        if status.status != ClearanceStatusEnum.APPROVED:
             return False
             
     # If the loop completes without returning, all statuses are approved.

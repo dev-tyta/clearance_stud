@@ -20,7 +20,8 @@ def create_device(db: Session, device: DeviceCreate) -> Optional[Device]:
     
     db_device = Device(
         device_name=device.device_name,
-        department=device.department,
+        location=device.location,  # ADD THIS
+        department=device.department,  # ADD THIS
         api_key=api_key,
         is_active=True
     )
@@ -29,6 +30,10 @@ def create_device(db: Session, device: DeviceCreate) -> Optional[Device]:
     db.commit()
     db.refresh(db_device)
     return db_device
+
+def get_device_by_id(db: Session, device_id: int) -> Optional[Device]:
+    """Retrieves a device by its primary key ID."""
+    return db.get(Device, device_id)
 
 def get_device_by_api_key(db: Session, api_key: str) -> Optional[Device]:
     """Retrieves an active device by its API key."""

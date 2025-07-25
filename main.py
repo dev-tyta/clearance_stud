@@ -4,25 +4,51 @@ from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from contextlib import asynccontextmanager
+import os
+from fastapi import FastAPI
+from sqlmodel import Session
+from starlette.middleware.cors import CORSMiddleware
+
 
 # Correctly import the database table creation function
-from src.database import create_db_and_tables
+from src.database import create_db_and_tables, engine
 # Import all the necessary routers for the application
 from src.routers import students, devices, clearance, token, users, admin
+from src.crud import users as user_crud
+from src.models import UserCreate, Role
 
 @asynccontextmanager
-async def lifespan(app_instance: FastAPI):
-    """
-    Handles application startup and shutdown events.
-    - On startup, it ensures that all necessary database tables are created.
-    - On shutdown, it can be used for cleanup tasks.
-    """
-    print("Application startup: Initializing...")
-    # Correctly call the function to create database tables
+async def lifespan(app: FastAPI):
+    # On startup
+    print("Starting up...")
     create_db_and_tables()
-    print("Application startup: Database tables checked/created.")
+    
+    # --- Create first superuser ---
+    # This runs only on startup. It checks if an admin exists and creates one if not.
+    # It's best practice to get credentials from environment variables for security.
+    with Session(engine) as session:
+        initial_username = os.getenv("INITIAL_ADMIN_USERNAME", "admin")
+        
+        # Check if the user already exists
+        user = user_crud.get_user_by_username(session, username=initial_username)
+        if not user:
+            print("Initial admin user not found, creating one...")
+            initial_user = UserCreate(
+                username=initial_username,
+                email=os.getenv("INITIAL_ADMIN_EMAIL", "admin@example.com"),
+                full_name="Initial Admin",
+                password=os.getenv("INITIAL_ADMIN_PASSWORD", "changethispassword"),
+                role=Role.ADMIN
+            )
+            user_crud.create_user(db=session, user=initial_user)
+            print("Initial admin user created successfully.")
+        else:
+            print("Initial admin user already exists.")
+
     yield
-    print("Application shutdown: Cleaning up.")
+    # On shutdown
+    print("Shutting down...")
+
 
 
 # Initialize the FastAPI application instance with metadata for documentation

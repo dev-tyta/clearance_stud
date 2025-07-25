@@ -4,7 +4,7 @@ from sqlmodel import Session
 
 from src.database import get_session
 from src.auth import get_api_key
-from src.models import RFIDStatusResponse, RFIDScanRequest
+from src.models import RFIDStatusResponse, RFIDScanRequest, ClearanceStatusEnum
 from src.crud import students as student_crud
 from src.crud import users as user_crud
 
@@ -28,9 +28,10 @@ def check_rfid_status(
     # 1. Check if the tag belongs to a student
     student = student_crud.get_student_by_tag_id(db, tag_id=tag_id)
     if student:
-        # Check overall clearance status
+        # Check overall clearance status using proper enum comparison
         is_cleared = all(
-            status.status == "approved" for status in student.clearance_statuses
+            clearance.status == ClearanceStatusEnum.APPROVED 
+            for clearance in student.clearance_statuses
         )
         clearance_status_str = "Fully Cleared" if is_cleared else "Pending Clearance"
         
@@ -47,7 +48,7 @@ def check_rfid_status(
         return RFIDStatusResponse(
             status="found",
             full_name=user.full_name,
-            entity_type=user.role.value, # e.g. "Admin" or "Staff"
+            entity_type=user.role.value.title(),  # "Admin" or "Staff"
             clearance_status="N/A",
         )
 

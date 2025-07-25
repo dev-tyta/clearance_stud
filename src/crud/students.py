@@ -1,9 +1,10 @@
 from sqlmodel import Session, select
 from typing import List, Optional
 
-from src.models import Student, StudentCreate, StudentUpdate, RFIDTag, ClearanceStatus, Department, ClearanceProcess
-from src.auth import hash_password
-
+from src.models import (
+    Student, StudentCreate, StudentUpdate, User, Role, ClearanceStatus, ClearanceDepartment, RFIDTag
+)
+from src.crud import users as user_crud
 # --- Read Operations ---
 
 def get_student_by_id(db: Session, student_id: int) -> Optional[Student]:
@@ -15,84 +16,81 @@ def get_student_by_matric_no(db: Session, matric_no: str) -> Optional[Student]:
     return db.exec(select(Student).where(Student.matric_no == matric_no)).first()
 
 def get_student_by_tag_id(db: Session, tag_id: str) -> Optional[Student]:
-    """Retrieves a student by their linked RFID tag ID."""
-    statement = select(Student).join(RFIDTag).where(RFIDTag.tag_id == tag_id)
-    return db.exec(statement).first()
+    """Get student by RFID tag ID."""
+    from src.models import RFIDTag
+    tag = db.exec(select(RFIDTag).where(RFIDTag.tag_id == tag_id)).first()
+    if tag and tag.student_id:
+        return db.exec(select(Student).where(Student.id == tag.student_id)).first()
+    return None
 
 def get_all_students(db: Session, skip: int = 0, limit: int = 100) -> List[Student]:
     """Retrieves a paginated list of all students."""
     return db.exec(select(Student).offset(skip).limit(limit)).all()
 
 # --- Write Operations ---
-
-def create_student(db: Session, student: StudentCreate) -> Student:
+def create_student(db: Session, student_data: StudentCreate) -> Student:
     """
-    Creates a new student and initializes their clearance statuses.
-
-    This is a critical business logic function. When a student is created,
-    this function automatically creates a 'pending' clearance record for every
-    department defined in the `Department` enum.
+    Creates a new student along with their associated user account for login
+    and initializes their clearance statuses.
     """
-    hashed_pass = hash_password(student.password)
-    db_student = Student(
-        matric_no=student.matric_no,
-        full_name=student.full_name,
-        email=student.email,
-        hashed_password=hashed_pass,
-        # Department will be set from the StudentCreate model
-        department=student.department 
+    # 1. Create the associated User account for the student to log in
+    # The student's username is their matriculation number.
+    user_for_student = user_crud.UserCreate(
+        username=student_data.matric_no,
+        password=student_data.password,
+        email=student_data.email,
+        full_name=student_data.full_name,
+        role=Role.STUDENT
     )
-    
-    # --- Auto-populate clearance statuses ---
-    initial_statuses = []
-    for dept in Department:
-        status = ClearanceStatus(
-            department=dept,
-            status=ClearanceProcess.PENDING
-        )
-        initial_statuses.append(status)
-    
-    db_student.clearance_statuses = initial_statuses
-    # --- End of auto-population ---
+    # This might raise an exception if username/email exists, which is good.
+    db_user = user_crud.create_user(db, user=user_for_student)
 
+    # 2. Create the Student profile
+    db_student = Student(
+        full_name=student_data.full_name,
+        matric_no=student_data.matric_no,
+        email=student_data.email,
+        department=student_data.department,
+        # Note: The User linkage is handled via the RFID tag linking process
+    )
     db.add(db_student)
     db.commit()
     db.refresh(db_student)
-    return db_student
 
-def update_student(db: Session, student_id: int, student_update: StudentUpdate) -> Optional[Student]:
-    """
-    Updates a student's information.
-    If a new password is provided, it will be hashed.
-    """
-    db_student = db.get(Student, student_id)
-    if not db_student:
-        return None
-
-    update_data = student_update.model_dump(exclude_unset=True)
+    # 3. Initialize all clearance statuses for the new student
+    for dept in ClearanceDepartment:
+        status = ClearanceStatus(student_id=db_student.id, department=dept)
+        db.add(status)
     
-    if "password" in update_data:
-        update_data["hashed_password"] = hash_password(update_data.pop("password"))
-
-    for key, value in update_data.items():
-        setattr(db_student, key, value)
-    
-    db.add(db_student)
     db.commit()
     db.refresh(db_student)
+    
     return db_student
 
-def delete_student(db: Session, student_id: int) -> Optional[Student]:
-    """
-
-    Deletes a student from the database.
-    All associated clearance statuses and the linked RFID tag will also be 
-    deleted automatically due to the cascade settings in the data models.
-    """
-    db_student = db.get(Student, student_id)
-    if not db_student:
+def update_student(db: Session, student: Student, updates: StudentUpdate) -> Student:
+    """Updates a student's profile information."""
+    student = get_student_by_id(db, student_id=student.id)
+    if not student:
         return None
     
-    db.delete(db_student)
+    update_data = updates.model_dump(exclude_unset=True)
+    student.sqlmodel_update(update_data)
+    db.add(student)
     db.commit()
-    return db_student
+    db.refresh(student)
+    return student
+
+def delete_student(db: Session, student_id: int) -> Student | None:
+    """Deletes a student and their associated clearance records."""
+    student_to_delete = db.get(Student, student_id)
+    if not student_to_delete:
+        return None
+    
+    # Also delete the associated user account
+    user_to_delete = user_crud.get_user_by_username(db, username=student_to_delete.matric_no)
+    if user_to_delete:
+        db.delete(user_to_delete)
+
+    db.delete(student_to_delete)
+    db.commit()
+    return student_to_delete

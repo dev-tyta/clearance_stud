@@ -1,29 +1,36 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session
+from sqlmodel import Session, SQLModel
 
-from src.database import get_session
 from src.auth import get_current_active_user
-from src.models import Student, StudentReadWithClearance
+from src.database import get_session
+from src.models import StudentReadWithClearance
+
+# This is the new request body model for the POST request.
+class StudentLookupRequest(SQLModel):
+    matric_no: str
 
 router = APIRouter(
     prefix="/students",
     tags=["Students"],
+    # This endpoint still requires a user to be logged in.
+    dependencies=[Depends(get_current_active_user)]
 )
 
-@router.get("/me", response_model=StudentReadWithClearance)
-def read_student_me(
-    # This dependency ensures the user is an authenticated student
-    # and injects their database object into the 'current_student' parameter.
-    current_student: Student = Depends(get_current_active_user)
+@router.post("/lookup", response_model=StudentReadWithClearance)
+def lookup_student_by_matric_no(
+    request: StudentLookupRequest,
+    db: Session = Depends(get_session)
 ):
     """
-    Endpoint for a logged-in student to retrieve their own profile
-    and clearance information. The user is identified via their JWT token.
+    Endpoint for a logged-in user to retrieve a student's profile
+    and clearance information by providing their matriculation number.
     """
-    # Because the dependency returns the full student object, we can just return it.
-    # No need for another database call.
-    if not current_student:
-         # This should not happen if the dependency is set up correctly
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-    return current_student
+    student = student_crud.get_student_by_matric_no(db=db, matric_no=request.matric_no)
 
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Student with the provided matriculation number not found."
+        )
+    
+    return student

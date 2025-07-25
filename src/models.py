@@ -70,6 +70,7 @@ class Device(SQLModel, table=True):
     device_name: str = Field(unique=True, index=True)
     api_key: str = Field(unique=True, index=True)
     location: str
+    department: Department  # ADD THIS - referenced in devices.py CRUD
     is_active: bool = Field(default=True)
 
 # --- Pydantic Models for API Operations ---
@@ -156,10 +157,10 @@ class RFIDScanRequest(SQLModel):
     tag_id: str
 
 class RFIDStatusResponse(SQLModel):
-    status: str
+    status: str  # "found" or "unregistered"  # "found" or "unregistered"
     full_name: Optional[str] = None
-    message: Optional[str] = None
-    clearance: Optional[str] = None
+    entity_type: Optional[str] = None  # "Student", "Admin", "Staff"None  # "Student", "Admin", "Staff"
+    clearance_status: Optional[str] = None  # "Fully Cleared", "Pending Clearance", "N/A" = None  # "Fully Cleared", "Pending Clearance", "N/A"
 
 class TagScan(SQLModel):
     tag_id: str
@@ -168,10 +169,12 @@ class TagScan(SQLModel):
 class DeviceCreate(SQLModel):
     device_name: str
     location: str
+    department: Department  # ADD THIS
 
 class DeviceRead(SQLModel):
     id: int
     device_name: str
     api_key: str
     location: str
+    department: Department  # ADD THIS
     is_active: bool

@@ -1,63 +1,94 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlmodel import Session
+from sqlmodel import Session, SQLModel
 from typing import List, Optional, Dict
 
 from src.database import get_session
-from src.auth import get_current_active_user
+from src.auth import get_current_active_user, get_api_key
 from src.models import (
     User, UserCreate, UserRead, UserUpdate, Role,
-    Student, StudentCreate, StudentRead, StudentUpdate, StudentReadWithClearance,
-    TagLink, RFIDTagRead, TagScan,
-    Device, DeviceCreate, DeviceRead
+    Student, StudentCreate, StudentReadWithClearance, StudentUpdate, StudentRead,
+    TagLink, RFIDTagRead, Device, DeviceCreate, DeviceRead, TagScan
 )
 from src.crud import users as user_crud
 from src.crud import students as student_crud
 from src.crud import tag_linking as tag_crud
 from src.crud import devices as device_crud
 
-# In-memory storage for last scanned tags by an admin.
-# Key: admin user ID, Value: last scanned tag ID.
-# This is simple and effective for a non-distributed system.
+# --- New State Management for Secure Admin Scanning ---
+
+# Maps a device's API key to the admin user ID who activated it.
+# This "activates" a scanner for a specific admin.
+activated_scanners: Dict[str, int] = {} 
+
+# Stores the last tag scanned by a device, keyed by the admin ID who was waiting.
 admin_scanned_tags: Dict[int, str] = {}
 
-# Define the router.
-# It's accessible to both Admins and Staff, providing a unified management panel.
+
+# Define the main administrative router
 router = APIRouter(
     prefix="/admin",
     tags=["Administration"],
     dependencies=[Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))],
 )
 
-# --- Admin Tag Scanning for Web UI ---
+# --- New Secure Scanning Workflow ---
 
-@router.post("/tags/scan", status_code=status.HTTP_204_NO_CONTENT)
-def report_scanned_tag(
-    scan_data: TagScan,
+class ActivationRequest(SQLModel):
+    device_id: int
+
+@router.post("/scanners/activate", status_code=status.HTTP_204_NO_CONTENT)
+def activate_admin_scanner(
+    activation: ActivationRequest,
+    db: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))
 ):
     """
-    (Admin & Staff) Endpoint for the admin's desk RFID reader to report a scanned tag.
-    The backend stores this tag ID temporarily against the admin's user ID.
+    STEP 1 (Browser): Admin clicks "Scan Card" in the UI.
+    The browser calls this endpoint to 'arm' their designated desk scanner.
     """
-    admin_scanned_tags[current_user.id] = scan_data.tag_id
+    device = device_crud.get_device_by_id(db, device_id=activation.device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found.")
+    
+    # Map the device's API key to the currently logged-in admin's ID.
+    activated_scanners[device.api_key] = current_user.id
     return
 
-@router.get("/tags/scan", response_model=TagScan)
-def retrieve_scanned_tag(
+
+@router.post("/scanners/scan", status_code=status.HTTP_204_NO_CONTENT)
+def receive_scan_from_activated_device(
+    scan_data: TagScan,
+    api_key: str = Depends(get_api_key) # Device authenticates with its API Key
+):
+    """
+    STEP 2 (Device): The ESP32 device sends the scanned tag to this endpoint.
+    This endpoint is protected by the device's API Key.
+    """
+    # Check if this device was activated by an admin.
+    admin_id = activated_scanners.pop(api_key, None)
+    if admin_id is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This scanner has not been activated for a scan.")
+
+    # Store the scanned tag against the admin who was waiting for it.
+    admin_scanned_tags[admin_id] = scan_data.tag_id
+    return
+
+@router.get("/scanners/retrieve", response_model=TagScan)
+def retrieve_scanned_tag_for_ui(
     current_user: User = Depends(get_current_active_user(required_roles=[Role.ADMIN, Role.STAFF]))
 ):
     """
-    (Admin & Staff) Endpoint for the admin's web portal to retrieve the last scanned tag.
-    The tag is removed after being retrieved to prevent re-use.
+    STEP 3 (Browser): The browser polls this endpoint to get the tag ID
+    that the device reported in STEP 2.
     """
     tag_id = admin_scanned_tags.pop(current_user.id, None)
     if not tag_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No tag has been scanned recently.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No tag has been scanned by the activated device yet.")
     return TagScan(tag_id=tag_id)
 
 
-# --- Student Management (Admin + Staff) ---
-
+# --- All other administrative endpoints remain the same ---
+# ... (Student Management, User Management, etc.) ...
 @router.post("/students/", response_model=StudentReadWithClearance, status_code=status.HTTP_201_CREATED)
 def create_student(student: StudentCreate, db: Session = Depends(get_session)):
     """(Admin & Staff) Creates a new student and initializes their clearance status."""
@@ -128,7 +159,10 @@ def unlink_rfid_tag(tag_id: str, db: Session = Depends(get_session)):
     """(Admin & Staff) Unlinks an RFID tag, making it available again."""
     deleted_tag = tag_crud.unlink_tag(db, tag_id)
     if not deleted_tag:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RFID Tag not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="RFID Tag not found."
+        )
     return deleted_tag
 
 
@@ -142,12 +176,18 @@ def require_super_admin(current_user: User = Depends(get_current_active_user()))
             detail="This action requires Super Admin privileges."
         )
 
-@router.post("/users/", response_model=UserRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_super_admin)])
-def create_user(user: UserCreate, db: Session = Depends(get_session)):
-    """(Super Admin Only) Creates a new user (Staff or Admin)."""
-    db_user = user_crud.get_user_by_username(db, username=user.username)
-    if db_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
+@router.post(
+    "/users/",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_active_user(required_roles=[Role.ADMIN]))]
+)
+def create_user_as_admin(user: UserCreate, db: Session = Depends(get_session)):
+    """(Super Admin Only) Creates a new user (admin or staff)."""
+    if user_crud.get_user_by_username(db, username=user.username):
+        raise HTTPException(status_code=400, detail="Username already registered.")
+    if user_crud.get_user_by_email(db, email=user.email):
+        raise HTTPException(status_code=400, detail="Email already registered.")
     return user_crud.create_user(db=db, user=user)
 
 @router.get("/users/", response_model=List[UserRead], dependencies=[Depends(require_super_admin)])
